@@ -106,7 +106,13 @@ pub(crate) struct Target {
 /// Computes overview rows `out_rows` (all columns) of `band`, its windows clamped to the source
 /// rows `chunk`, with the factor-of-two average's groups of pixels counted from column
 /// `group_origin`. Returns the overview values (of the overview's data type, as `f64`).
-pub(crate) fn resample(band: &Band, t: &Target, out_rows: std::ops::Range<usize>, chunk: std::ops::Range<usize>, group_origin: usize) -> Vec<f64> {
+pub(crate) fn resample(
+    band: &Band,
+    t: &Target,
+    out_rows: std::ops::Range<usize>,
+    chunk: std::ops::Range<usize>,
+    group_origin: usize,
+) -> Vec<f64> {
     let rx = band.width as f64 / t.width as f64;
     let ry = band.height as f64 / t.height as f64;
     let (cx0, cx1) = (0usize, band.width);
@@ -129,7 +135,9 @@ pub(crate) fn resample(band: &Band, t: &Target, out_rows: std::ops::Range<usize>
             for i in out_rows {
                 let (y0, y1, fy0, fy1) = window(i, ry, cy0, cy1);
                 match t.method {
-                    Method::Average => average.row(&mut out, &xs, (y0, y1, fy0, fy1), &at, &ok, band.valid.is_some(), spacing_two, group_origin),
+                    Method::Average => {
+                        average.row(&mut out, &xs, (y0, y1, fy0, fy1), &at, &ok, band.valid.is_some(), spacing_two, group_origin)
+                    }
                     Method::Mode => {
                         for w in &xs {
                             out.push(mode(w, (y0, y1), &at, &ok, band.valid.is_some(), t));
@@ -400,7 +408,14 @@ fn replacement_value(dt: DataType, nd: f64) -> f64 {
 
 /// GDAL's mode (`GDALResampleChunk_ModeT`): the first value to reach the highest count. Byte bands
 /// leave out the nodata value only (not the mask); others leave out what the mask does.
-fn mode(w: &XWindow, (y0, y1): (usize, usize), at: &impl Fn(usize, usize) -> f64, ok: &impl Fn(usize, usize) -> bool, masked: bool, t: &Target) -> f64 {
+fn mode(
+    w: &XWindow,
+    (y0, y1): (usize, usize),
+    at: &impl Fn(usize, usize) -> f64,
+    ok: &impl Fn(usize, usize) -> bool,
+    masked: bool,
+    t: &Target,
+) -> f64 {
     // Signed integers are compared as unsigned values of their size: an out-of-range nodata
     // value leaves the empty windows at 0.
     let in_range = |nd: f64| match t.data_type {
@@ -418,11 +433,7 @@ fn mode(w: &XWindow, (y0, y1): (usize, usize), at: &impl Fn(usize, usize) -> f64
     for y in y0..y1 {
         for x in w.x0..w.x1 {
             let v = at(x, y);
-            let valid = if t.data_type == DataType::U8 {
-                t.nodata.is_none() || v != empty
-            } else {
-                !masked || ok(x, y)
-            };
+            let valid = if t.data_type == DataType::U8 { t.nodata.is_none() || v != empty } else { !masked || ok(x, y) };
             if !valid {
                 continue;
             }

@@ -3,7 +3,9 @@
 
 use super::rasterout::parse_bbox;
 use terrio::ops::Resampling;
-use terrio::ops::overview::{DeleteOptions, OverviewOptions, RefreshOptions, add_overviews, dataset_bounds, delete_overviews, refresh_overviews};
+use terrio::ops::overview::{
+    DeleteOptions, OverviewOptions, RefreshOptions, add_overviews, dataset_bounds, delete_overviews, refresh_overviews,
+};
 
 /// Build overviews of a GeoTIFF in place, or in its `.ovr` sidecar (like gdaladdo and `gdal raster
 /// overview add`); with `--clean`, delete them (`gdal raster overview delete`); with `--refresh`,

@@ -314,7 +314,12 @@ pub fn dataset_bounds(path: &str, crs: &crate::crs::SpatialRef) -> Result<[f64; 
     let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)].map(|(c, l)| super::apply_gt(&gt, c, l));
     let xs = corners.map(|c| c.0);
     let ys = corners.map(|c| c.1);
-    let b = (xs.iter().copied().fold(f64::INFINITY, f64::min), ys.iter().copied().fold(f64::INFINITY, f64::min), xs.iter().copied().fold(f64::NEG_INFINITY, f64::max), ys.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+    let b = (
+        xs.iter().copied().fold(f64::INFINITY, f64::min),
+        ys.iter().copied().fold(f64::INFINITY, f64::min),
+        xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    );
     let own = r.crs();
     if own.is_unknown() || crs.is_unknown() || own.same_as(crs) {
         return Ok([b.0, b.1, b.2, b.3]);
@@ -353,10 +358,7 @@ fn overview_method(r: Resampling) -> Result<OverviewResampling> {
         Resampling::Max => OverviewResampling::Max,
         Resampling::Mode => OverviewResampling::Mode,
         other => {
-            return Err(Error::Unsupported(format!(
-                "'{}' overviews are not supported (nearest, average, min, max, mode)",
-                other.name()
-            )));
+            return Err(Error::Unsupported(format!("'{}' overviews are not supported (nearest, average, min, max, mode)", other.name())));
         }
     })
 }
@@ -417,7 +419,12 @@ fn images(tiff: &Tiff) -> Images {
 
 /// The layout, compression and codec parameters of new images like `dir` (the full-resolution
 /// image or an existing overview), in another compression when one is given.
-fn layout_like(dir: &Directory, compression: Option<&str>, new_image: bool, data_type: DataType) -> Result<(Layout, Compression, CodecParams)> {
+fn layout_like(
+    dir: &Directory,
+    compression: Option<&str>,
+    new_image: bool,
+    data_type: DataType,
+) -> Result<(Layout, Compression, CodecParams)> {
     if matches!(dir.uint(339), Some(5 | 6)) {
         return Err(Error::Unsupported("overviews of complex GeoTIFF samples are not supported".into()));
     }
@@ -427,7 +434,9 @@ fn layout_like(dir: &Directory, compression: Option<&str>, new_image: bool, data
     }
     let own = Compression::from_tiff(dir.uint(259).unwrap_or(1) as u16, dir.get(50674).and_then(|e| e.uints().get(1).copied()));
     let compression = match compression {
-        Some(name) => Compression::parse(name).ok_or_else(|| Error::Unsupported(format!("'{name}' overview compression is not supported")))?,
+        Some(name) => {
+            Compression::parse(name).ok_or_else(|| Error::Unsupported(format!("'{name}' overview compression is not supported")))?
+        }
         None => own.unwrap_or_else(|| {
             crate::warnings::warn("the image's compression is not one terrio encodes: overviews are compressed with DEFLATE".into());
             Compression::Deflate
@@ -501,7 +510,14 @@ impl Sources<'_> {
     /// Rows `rows` (all columns) of the full-resolution image (`level` `None`) or of a stored
     /// overview, with the level's mask (255 valid) when `want_mask`, and the rows of `computed`
     /// (the level's new pixels) over them.
-    fn rows(&mut self, level: Option<usize>, size: (usize, usize), rows: std::ops::Range<usize>, computed: Option<&Computed>, want_mask: bool) -> Result<(RasterData, Option<Vec<u8>>)> {
+    fn rows(
+        &mut self,
+        level: Option<usize>,
+        size: (usize, usize),
+        rows: std::ops::Range<usize>,
+        computed: Option<&Computed>,
+        want_mask: bool,
+    ) -> Result<(RasterData, Option<Vec<u8>>)> {
         let (w, n) = (size.0, rows.len());
         let bands = self.src.band_count();
         if let Some(c) = computed.filter(|c| c.rows.start <= rows.start && c.rows.end >= rows.end) {
@@ -548,7 +564,17 @@ fn slice_rows(data: &RasterData, rows: usize, cols: usize, bands: usize, range: 
 /// Copies rows `range` (image rows) from `src` (rows from `src_start`) into `dst` (rows from
 /// `dst_start`), band-major images of the same type.
 #[allow(clippy::too_many_arguments)]
-fn overlay_rows(dst: &mut RasterData, dst_rows: usize, dst_start: usize, src: &RasterData, src_rows: usize, src_start: usize, range: std::ops::Range<usize>, cols: usize, bands: usize) {
+fn overlay_rows(
+    dst: &mut RasterData,
+    dst_rows: usize,
+    dst_start: usize,
+    src: &RasterData,
+    src_rows: usize,
+    src_start: usize,
+    range: std::ops::Range<usize>,
+    cols: usize,
+    bands: usize,
+) {
     macro_rules! copy {
         ($($t:ident),*) => {
             match (dst, src) {
@@ -579,7 +605,16 @@ fn source_rows(rows: &std::ops::Range<usize>, out_rows: usize, src_rows: usize) 
 /// Resamples one band (`values`, rows `src_rows` of a level of `src_size`) to rows `rows` of an
 /// overview, as GDAL schedules it.
 #[allow(clippy::too_many_arguments)]
-fn resample_band(values: &[f64], valid: Option<&[bool]>, src_size: (usize, usize), src_rows: std::ops::Range<usize>, t: &kernel::Target, rows: std::ops::Range<usize>, chunk_rows: Option<usize>, group_origin: usize) -> Vec<f64> {
+fn resample_band(
+    values: &[f64],
+    valid: Option<&[bool]>,
+    src_size: (usize, usize),
+    src_rows: std::ops::Range<usize>,
+    t: &kernel::Target,
+    rows: std::ops::Range<usize>,
+    chunk_rows: Option<usize>,
+    group_origin: usize,
+) -> Vec<f64> {
     let band = kernel::Band { values, valid, width: src_size.0, height: src_size.1, rows: src_rows.clone() };
     match chunk_rows {
         Some(chunk) if rows == (0..t.height) && src_rows == (0..src_size.1) => {
@@ -616,7 +651,13 @@ fn from_values(data_type: DataType, values: Vec<f64>) -> RasterData {
 
 /// What a level is computed from: the previous level (computed, or stored at `level`) or full
 /// resolution.
-fn source_of<'c>(sched: Schedule, prev: Option<&'c Computed>, size: (usize, usize), full: (usize, usize), overviews: &[(usize, usize)]) -> ((usize, usize), Option<usize>, Option<&'c Computed>) {
+fn source_of<'c>(
+    sched: Schedule,
+    prev: Option<&'c Computed>,
+    size: (usize, usize),
+    full: (usize, usize),
+    overviews: &[(usize, usize)],
+) -> ((usize, usize), Option<usize>, Option<&'c Computed>) {
     match prev.filter(|p| sched.from_prev && p.size.0 > size.0) {
         Some(p) => (p.size, overviews.iter().position(|s| *s == p.size), Some(p)),
         None => (full, None, None),
@@ -648,7 +689,16 @@ fn alpha_band(src: &mut LazyRaster) -> Option<usize> {
 /// The schedules GDAL computes the levels of `sizes` (largest first, with their blocks) with:
 /// for the data, and for the mask when the raster has one.
 #[allow(clippy::too_many_arguments)]
-fn schedules(full: (usize, usize), base_block: (usize, usize), sizes: &[(usize, usize)], blocks: &[(usize, usize)], method: OverviewResampling, data_type: DataType, multiband: bool, has_mask: bool) -> (Vec<Schedule>, Vec<Option<Schedule>>) {
+fn schedules(
+    full: (usize, usize),
+    base_block: (usize, usize),
+    sizes: &[(usize, usize)],
+    blocks: &[(usize, usize)],
+    method: OverviewResampling,
+    data_type: DataType,
+    multiband: bool,
+    has_mask: bool,
+) -> (Vec<Schedule>, Vec<Option<Schedule>>) {
     let factor = |src: (usize, usize), dst: (usize, usize)| {
         ((src.0 as f64 / dst.0 as f64 + 0.5) as usize).max((src.1 as f64 / dst.1 as f64 + 0.5) as usize).max(1)
     };
@@ -685,7 +735,16 @@ fn schedules(full: (usize, usize), base_block: (usize, usize), sizes: &[(usize, 
 /// computes masks band by band, then the data from them). `group_origin` is the first column of
 /// the region GDAL computes (for the grouping of its factor-of-two averages).
 #[allow(clippy::too_many_arguments)]
-fn compute(srcs: &mut Sources, size: (usize, usize), rows: std::ops::Range<usize>, prev: Option<&Computed>, method: OverviewResampling, data: Schedule, mask: Option<Schedule>, group_origin: usize) -> Result<Computed> {
+fn compute(
+    srcs: &mut Sources,
+    size: (usize, usize),
+    rows: std::ops::Range<usize>,
+    prev: Option<&Computed>,
+    method: OverviewResampling,
+    data: Schedule,
+    mask: Option<Schedule>,
+    group_origin: usize,
+) -> Result<Computed> {
     let full = (srcs.src.width(), srcs.src.height());
     let overviews = srcs.src.overviews();
     let (bands, data_type, nodata) = (srcs.src.band_count(), srcs.src.data_type(), srcs.src.nodata());
@@ -711,7 +770,8 @@ fn compute(srcs: &mut Sources, size: (usize, usize), rows: std::ops::Range<usize
     let (src_data, src_mask) = srcs.rows(level, dsize, drows.clone(), computed, want_mask)?;
     let n = dsize.0 * drows.len();
     let t = kernel::Target { width: size.0, height: size.1, data_type, nodata, method };
-    let alpha: Option<Vec<bool>> = srcs.alpha.filter(|_| masked && src_mask.is_none()).map(|a| band_values(&src_data, a, n).iter().map(|v| *v != 0.0).collect());
+    let alpha: Option<Vec<bool>> =
+        srcs.alpha.filter(|_| masked && src_mask.is_none()).map(|a| band_values(&src_data, a, n).iter().map(|v| *v != 0.0).collect());
     let mut out = Vec::with_capacity(size.0 * rows.len() * bands);
     for b in 0..bands {
         let values = band_values(&src_data, b, n);
@@ -744,7 +804,14 @@ fn stored_method(dir: &Directory) -> Option<Result<OverviewResampling>> {
 }
 
 /// Encodes a computed level as a new overview image like `like` (the full-resolution image).
-fn new_level_image(c: &Computed, like: &Directory, compression: Option<&str>, method: OverviewResampling, data_type: DataType, bands: usize) -> Result<(gw::Image, Option<gw::Image>)> {
+fn new_level_image(
+    c: &Computed,
+    like: &Directory,
+    compression: Option<&str>,
+    method: OverviewResampling,
+    data_type: DataType,
+    bands: usize,
+) -> Result<(gw::Image, Option<gw::Image>)> {
     let (layout, compression, codec) = layout_like(like, compression, true, data_type)?;
     let level = gw::Level { cols: c.size.0, rows: c.size.1, bands, data: std::borrow::Cow::Borrowed(&c.data) };
     let mut img = level.image(data_type, compression, &codec, &layout)?;
@@ -778,7 +845,13 @@ fn shared_tags(main: &Directory, dir: &mut Directory) {
 
 /// Computes whole new levels of `sizes` (in cascade, largest first) as images like `like`
 /// (without mask images: for an `.ovr` sidecar).
-fn build_new_levels(src: &mut LazyRaster, like: &Directory, sizes: &[(usize, usize)], method: OverviewResampling, compression: &str) -> Result<Vec<gw::Image>> {
+fn build_new_levels(
+    src: &mut LazyRaster,
+    like: &Directory,
+    sizes: &[(usize, usize)],
+    method: OverviewResampling,
+    compression: &str,
+) -> Result<Vec<gw::Image>> {
     let sizes = sorted_sizes(sizes.to_vec());
     let (layout, new_compression, ..) = layout_like(like, Some(compression), true, src.data_type())?;
     let blocks: Vec<(usize, usize)> = sizes.iter().map(|s| chunk_size(&layout, s.0)).collect();
@@ -847,7 +920,9 @@ fn add_internal<F: Read + Write + Seek>(
     let sizes = sorted_sizes(sizes);
     let main_dir = &tiff.dirs[main];
     if method == OverviewResampling::Average && main_dir.uint(262) == Some(3) {
-        return Err(Error::Unsupported("average overviews of palette images are not supported (GDAL averages their colors): use nearest or mode".into()));
+        return Err(Error::Unsupported(
+            "average overviews of palette images are not supported (GDAL averages their colors): use nearest or mode".into(),
+        ));
     }
     // The block of each level: an existing level's own, else the one new images take.
     let (new_layout, ..) = layout_like(main_dir, compression, true, src.data_type())?;
@@ -880,8 +955,21 @@ fn add_internal<F: Read + Write + Seek>(
                 let mut dir = replace_chunks(&mut a, &tiff.dirs[i], &c, 0..c.size.0, src.data_type(), src.band_count(), None)?;
                 dir.set(Entry::new(42112, &Value::Ascii(resampling_item(method)), tiff.big));
                 let mask = match (mask, &c.mask) {
-                    (Some(m), Some(_)) => Some(replace_chunks(&mut a, &tiff.dirs[m], &c, 0..c.size.0, src.data_type(), src.band_count(), Some(&tiff.dirs[i]))?),
-                    (None, Some(_)) if im.main_mask => new_level_image(&c, main_dir, compression, method, src.data_type(), src.band_count())?.1.map(|m| a.image(m)).transpose()?,
+                    (Some(m), Some(_)) => Some(replace_chunks(
+                        &mut a,
+                        &tiff.dirs[m],
+                        &c,
+                        0..c.size.0,
+                        src.data_type(),
+                        src.band_count(),
+                        Some(&tiff.dirs[i]),
+                    )?),
+                    (None, Some(_)) if im.main_mask => {
+                        new_level_image(&c, main_dir, compression, method, src.data_type(), src.band_count())?
+                            .1
+                            .map(|m| a.image(m))
+                            .transpose()?
+                    }
                     _ => None,
                 };
                 (dir, mask)
@@ -951,7 +1039,7 @@ fn replace_chunks<F: Write + Seek>(
         }
     };
     let (cw, ch) = (chunk.0, chunk.1.min(h.max(1)));
-    if c.rows.start % ch != 0 || (c.rows.end != h && c.rows.end % ch != 0) {
+    if !c.rows.start.is_multiple_of(ch) || (c.rows.end != h && !c.rows.end.is_multiple_of(ch)) {
         return Err(Error::InvalidData("refreshed overview rows are not aligned to its blocks".into()));
     }
     let across = w.div_ceil(cw);
@@ -1006,9 +1094,7 @@ fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &Refre
         .overviews
         .iter()
         .copied()
-        .filter(|(s, ..)| {
-            o.levels.is_empty() || o.levels.iter().any(|f| matches_factor(*s, (w, h), *f))
-        })
+        .filter(|(s, ..)| o.levels.is_empty() || o.levels.iter().any(|f| matches_factor(*s, (w, h), *f)))
         .collect();
     if targets.is_empty() {
         return Err(Error::InvalidArgument("no overview to refresh".into()));
@@ -1025,12 +1111,15 @@ fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &Refre
     let region = match o.bbox.as_slice() {
         [] => Some([0, 0, w, h]),
         boxes => {
-            let inv = super::invert_gt(&src.geo_transform()).ok_or_else(|| Error::InvalidData("the raster's geotransform cannot be inverted".into()))?;
+            let inv = super::invert_gt(&src.geo_transform())
+                .ok_or_else(|| Error::InvalidData("the raster's geotransform cannot be inverted".into()))?;
             let mut r: Option<[usize; 4]> = None;
             for b in boxes {
                 let pts = [(b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3])].map(|(x, y)| super::apply_gt(&inv, x, y));
-                let (c0, c1) = (pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max));
-                let (l0, l1) = (pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max));
+                let (c0, c1) =
+                    (pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max));
+                let (l0, l1) =
+                    (pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max));
                 let x0 = c0.floor().clamp(0.0, w as f64) as usize;
                 let x1 = c1.ceil().clamp(0.0, w as f64) as usize;
                 let y0 = l0.floor().clamp(0.0, h as f64) as usize;
@@ -1069,7 +1158,8 @@ fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &Refre
     let mut prev: Option<Computed> = None;
     let mut srcs = Sources { src, base: None, alpha };
     for (k, (&(size, i, mask), method)) in targets.iter().zip(methods).enumerate() {
-        let (mut data, mut masks) = schedules((w, h), base_block(srcs.src), &sizes, &blocks, method, srcs.src.data_type(), multiband, has_mask);
+        let (mut data, mut masks) =
+            schedules((w, h), base_block(srcs.src), &sizes, &blocks, method, srcs.src.data_type(), multiband, has_mask);
         if !whole {
             // Partial refreshes compute whole windows (GDALRegenerateOverviewsMultiBand's region).
             for s in data.iter_mut().chain(masks.iter_mut().flatten()) {
@@ -1097,7 +1187,8 @@ fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &Refre
         }
         dirs[i] = dir;
         if let (Some(m), Some(_)) = (mask, &c.mask) {
-            dirs[m] = replace_chunks(&mut a, &tiff.dirs[m], &c, dx0..dx1, srcs.src.data_type(), srcs.src.band_count(), Some(&tiff.dirs[i]))?;
+            dirs[m] =
+                replace_chunks(&mut a, &tiff.dirs[m], &c, dx0..dx1, srcs.src.data_type(), srcs.src.band_count(), Some(&tiff.dirs[i]))?;
         }
         prev = Some(c);
     }
@@ -1107,7 +1198,14 @@ fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &Refre
 
 /// Puts back the pixels (and mask values) of `old` (the level's stored rows `c.rows`) outside
 /// columns `cols` and rows `rows` of a computed level.
-fn keep_outside(c: &mut Computed, old: &RasterData, old_mask: Option<&[u8]>, cols: std::ops::Range<usize>, rows: std::ops::Range<usize>, bands: usize) {
+fn keep_outside(
+    c: &mut Computed,
+    old: &RasterData,
+    old_mask: Option<&[u8]>,
+    cols: std::ops::Range<usize>,
+    rows: std::ops::Range<usize>,
+    bands: usize,
+) {
     let (w, n) = (c.size.0, c.rows.len());
     let inside = |y: usize, x: usize| rows.contains(&y) && cols.contains(&x);
     macro_rules! keep {

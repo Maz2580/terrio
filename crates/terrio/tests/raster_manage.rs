@@ -2,7 +2,9 @@
 //! leaves the file as it was; read-only, remote and COG inputs are refused).
 
 use terrio::ops::Resampling;
-use terrio::ops::overview::{DeleteOptions, OverviewOptions, RefreshOptions, add_overviews, add_overviews_to_bytes, delete_overviews, refresh_overviews};
+use terrio::ops::overview::{
+    DeleteOptions, OverviewOptions, RefreshOptions, add_overviews, add_overviews_to_bytes, delete_overviews, refresh_overviews,
+};
 use terrio::{DataType, RasterDataset, RasterWriteOptions, Window, WindowOptions};
 
 /// A UInt16 raster of `cols` x `rows` with nodata 0 at every seventh pixel, georeferenced.
@@ -47,7 +49,8 @@ fn internal_overviews_average_valid_pixels_and_keep_the_image() {
     // Factor 2: the rounded average of the valid pixels of each 2x2 block, as GDAL computes it.
     let first = level(&path, Some(0));
     for (y, x) in [(0, 0), (10, 17), (95, 127)] {
-        let block: Vec<f64> = [(0, 0), (0, 1), (1, 0), (1, 1)].iter().map(|(dy, dx)| before[(2 * y + dy) * 256 + 2 * x + dx]).filter(|v| *v != 0.0).collect();
+        let block: Vec<f64> =
+            [(0, 0), (0, 1), (1, 0), (1, 1)].iter().map(|(dy, dx)| before[(2 * y + dy) * 256 + 2 * x + dx]).filter(|v| *v != 0.0).collect();
         let expected = (block.iter().sum::<f64>() / block.len() as f64 + 0.5).floor();
         assert_eq!(first[y * 128 + x], expected, "({x}, {y})");
     }
@@ -128,7 +131,12 @@ fn failed_or_refused_updates_leave_the_file_unchanged() {
     assert!(add_overviews("https://example.com/a.tif", &OverviewOptions::default()).is_err());
     assert!(add_overviews("/vsizip/a.zip/a.tif", &OverviewOptions::default()).is_err());
     // A COG keeps its layout unless breaking it is allowed, as in GDAL.
-    let cog = write(dir.path(), "c.tif", &ds, &RasterWriteOptions { driver: Some(terrio::formats::RasterDriver::Cog), tile_size: Some(16), ..Default::default() });
+    let cog = write(
+        dir.path(),
+        "c.tif",
+        &ds,
+        &RasterWriteOptions { driver: Some(terrio::formats::RasterDriver::Cog), tile_size: Some(16), ..Default::default() },
+    );
     let cog_bytes = std::fs::read(&cog).unwrap();
     assert!(delete_overviews(&cog, &DeleteOptions::default()).is_err());
     assert_eq!(std::fs::read(&cog).unwrap(), cog_bytes);
@@ -138,7 +146,8 @@ fn failed_or_refused_updates_leave_the_file_unchanged() {
     assert!(terrio::open_raster_lazy(&cog).unwrap().overviews().is_empty());
     assert_eq!(level(&cog, None), level(&path, None));
     // Nothing is left behind next to the files.
-    let names: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    let names: Vec<String> =
+        std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.contains(".terrio-")), "{names:?}");
 }
 
@@ -164,7 +173,8 @@ fn overviews_of_tiffs_in_memory() {
     let mut r = terrio::LazyRaster::from_tiff_bytes(out.clone()).unwrap().unwrap();
     // A striped image gets 128-pixel tiled overviews, as GDAL makes them.
     assert_eq!(r.overviews(), vec![(50, 40), (25, 20)]);
-    let o0 = r.read_window(Window::new(0, 0, 50, 40), &WindowOptions { bands: vec![], overview: Some(0) }).unwrap().raster.data.to_f64_vec();
+    let o0 =
+        r.read_window(Window::new(0, 0, 50, 40), &WindowOptions { bands: vec![], overview: Some(0) }).unwrap().raster.data.to_f64_vec();
     let full = level(&path, None);
     // Nearest: the pixel at 0.5 + 2i.
     assert_eq!(o0[3 * 50 + 7], full[(3 * 2) * 100 + 7 * 2]);

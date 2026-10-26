@@ -398,7 +398,9 @@ impl LazyRaster {
         }
         match Self::open_tiff(path)? {
             Some(r) => Ok(r),
-            None => crate::open_raster(path).map(|ds| Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None, sidecar_overviews: None }),
+            None => {
+                crate::open_raster(path).map(|ds| Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None, sidecar_overviews: None })
+            }
         }
     }
 
@@ -794,7 +796,9 @@ impl LazyRaster {
         let gt = self.level_geo_transform(options.overview)?;
         // An overview of the `.ovr` sidecar.
         let external = match (options.overview, self.sidecar_overviews.as_mut()) {
-            (Some(i), Some(o)) => Some(o.read_window(window, &WindowOptions { bands: bands.clone(), overview: i.checked_sub(1) })?.raster.data),
+            (Some(i), Some(o)) => {
+                Some(o.read_window(window, &WindowOptions { bands: bands.clone(), overview: i.checked_sub(1) })?.raster.data)
+            }
             _ => None,
         };
         let (data, nodata, has_nodata, crs) = match &mut self.inner {

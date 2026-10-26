@@ -68,11 +68,12 @@ impl Entry {
     }
 
     /// The values of a `DOUBLE` tag.
+    #[allow(dead_code)] // For the in-place edits that follow.
     pub(crate) fn doubles(&self) -> Vec<f64> {
         if self.typ != 12 {
             return Vec::new();
         }
-        self.bytes.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect()
+        self.bytes.as_chunks::<8>().0.iter().map(|c| f64::from_le_bytes(*c)).collect()
     }
 
     /// The text of an `ASCII` tag, up to its first NUL.
@@ -195,7 +196,8 @@ pub(crate) fn parse<R: Read + Seek>(r: &mut R) -> Result<Tiff> {
         let mut c = [0u8; 8];
         read_at(r, next, &mut c[..count_len], len)?;
         let count = if big { u64::from_le_bytes(c) } else { u16::from_le_bytes([c[0], c[1]]) as u64 };
-        let table_len = count.checked_mul(entry_len as u64).filter(|n| *n <= len).ok_or_else(|| Error::InvalidData("TIFF: too many tags".into()))?;
+        let table_len =
+            count.checked_mul(entry_len as u64).filter(|n| *n <= len).ok_or_else(|| Error::InvalidData("TIFF: too many tags".into()))?;
         let mut table = vec![0u8; table_len as usize + inline];
         read_at(r, next + count_len as u64, &mut table, len)?;
         let mut entries = Vec::with_capacity(count as usize);
@@ -211,11 +213,13 @@ pub(crate) fn parse<R: Read + Seek>(r: &mut R) -> Result<Tiff> {
                 crate::warnings::warn(format!("TIFF tag {tag} of unknown field type {typ} is left out"));
                 continue;
             };
-            let bytes_len = n.checked_mul(size).filter(|b| *b <= len).ok_or_else(|| Error::InvalidData(format!("TIFF: tag {tag} is too large")))?;
+            let bytes_len =
+                n.checked_mul(size).filter(|b| *b <= len).ok_or_else(|| Error::InvalidData(format!("TIFF: tag {tag} is too large")))?;
             let bytes = if bytes_len as usize <= inline {
                 field[..bytes_len as usize].to_vec()
             } else {
-                let offset = if big { u64::from_le_bytes(field.try_into().unwrap()) } else { u32::from_le_bytes(field.try_into().unwrap()) as u64 };
+                let offset =
+                    if big { u64::from_le_bytes(field.try_into().unwrap()) } else { u32::from_le_bytes(field.try_into().unwrap()) as u64 };
                 let mut v = vec![0u8; bytes_len as usize];
                 read_at(r, offset, &mut v, len)?;
                 v
