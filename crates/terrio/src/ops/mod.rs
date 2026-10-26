@@ -28,6 +28,7 @@
 
 pub mod calc;
 pub mod contour;
+pub mod create;
 pub mod dem;
 pub mod edit;
 pub mod fill_nodata;
