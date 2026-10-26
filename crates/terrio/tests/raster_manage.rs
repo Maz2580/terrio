@@ -181,3 +181,57 @@ fn overviews_of_tiffs_in_memory() {
     let cleaned = terrio::ops::overview::delete_overviews_from_bytes(&out, &DeleteOptions::default()).unwrap();
     assert!(terrio::LazyRaster::from_tiff_bytes(cleaned).unwrap().unwrap().overviews().is_empty());
 }
+
+#[test]
+fn edits_change_georeferencing_and_metadata_but_not_pixels() {
+    use terrio::ops::edit::{EditOptions, edit_raster};
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "e.tif", &sample(120, 90), &tiled());
+    let before = level(&path, None);
+    let o = EditOptions {
+        crs: Some(terrio::crs::SpatialRef::parse("EPSG:4326").unwrap()),
+        bbox: Some([-106.0, 39.0, -105.0, 40.0]),
+        nodata: Some(7.0),
+        metadata: vec![("SOURCE".into(), "a & <b>".into())],
+        stats: true,
+        histogram: true,
+        ..Default::default()
+    };
+    edit_raster(&path, &o).unwrap();
+    let r = terrio::open_raster_lazy(&path).unwrap();
+    assert_eq!(r.crs().epsg, Some(4326));
+    assert_eq!(r.geo_transform(), [-106.0, 1.0 / 120.0, 0.0, 40.0, 0.0, -1.0 / 90.0]);
+    assert_eq!(r.nodata(), Some(7.0));
+    assert!(r.metadata().contains(&("SOURCE".into(), "a & <b>".into())));
+    assert_eq!(level(&path, None), before);
+    assert!(std::fs::read_to_string(format!("{path}.aux.xml")).unwrap().contains("<HistCounts>"));
+    // Unsetting.
+    let o = EditOptions { unset_crs: true, unset_nodata: true, unset_metadata: vec!["SOURCE".into()], ..Default::default() };
+    edit_raster(&path, &o).unwrap();
+    let r = terrio::open_raster_lazy(&path).unwrap();
+    assert!(r.crs().is_unknown());
+    assert_eq!(r.nodata(), None);
+    assert!(!r.metadata().iter().any(|(k, _)| k == "SOURCE"));
+    // Contradictory edits are refused before the file is touched.
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(edit_raster(&path, &EditOptions { nodata: Some(1.0), unset_nodata: true, ..Default::default() }).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn moves_follow_gdalmove() {
+    use terrio::ops::edit::{MoveOptions, move_raster};
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "m.tif", &sample(100, 100), &tiled());
+    let t_srs = terrio::crs::SpatialRef::parse("EPSG:26913").unwrap();
+    // Without a threshold, only a report.
+    let r = move_raster(&path, &MoveOptions { t_srs: t_srs.clone(), s_srs: None, error_threshold: None, ignore_cog_layout_break: false })
+        .unwrap();
+    assert!(!r.updated && r.max_error < 0.01, "{r:?}");
+    assert_eq!(terrio::open_raster_lazy(&path).unwrap().crs().epsg, Some(32613));
+    let r = move_raster(&path, &MoveOptions { t_srs, s_srs: None, error_threshold: Some(0.5), ignore_cog_layout_break: false }).unwrap();
+    assert!(r.updated);
+    let lazy = terrio::open_raster_lazy(&path).unwrap();
+    assert_eq!(lazy.crs().epsg, Some(26913));
+    assert_eq!(lazy.geo_transform(), r.geo_transform);
+}

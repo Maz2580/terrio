@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod convert;
 pub mod crs;
 pub mod dem;
+pub mod edit;
 pub mod fill_nodata;
 pub mod filter;
 pub mod formats;

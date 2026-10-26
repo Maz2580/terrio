@@ -868,7 +868,6 @@ fn plan(raster: &Raster, opts: &TiffOptions) -> Result<Plan> {
 
 /// The georeferencing, nodata and metadata tags [`write`] gives the full-resolution image of
 /// `raster` (only its header is read) with these options.
-#[allow(dead_code)] // For the in-place edits that follow.
 pub(crate) fn georeferencing_tags(raster: &Raster, opts: &TiffOptions) -> Result<Vec<(u16, Value)>> {
     Ok(plan(raster, opts)?.geo)
 }
@@ -1846,7 +1845,7 @@ pub(crate) fn xml_unescape(s: &str) -> String {
     s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 

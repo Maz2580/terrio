@@ -67,15 +67,6 @@ impl Entry {
             .collect()
     }
 
-    /// The values of a `DOUBLE` tag.
-    #[allow(dead_code)] // For the in-place edits that follow.
-    pub(crate) fn doubles(&self) -> Vec<f64> {
-        if self.typ != 12 {
-            return Vec::new();
-        }
-        self.bytes.as_chunks::<8>().0.iter().map(|c| f64::from_le_bytes(*c)).collect()
-    }
-
     /// The text of an `ASCII` tag, up to its first NUL.
     pub(crate) fn ascii(&self) -> Option<String> {
         (self.typ == 2).then(|| String::from_utf8_lossy(self.bytes.split(|b| *b == 0).next().unwrap_or_default()).into_owned())

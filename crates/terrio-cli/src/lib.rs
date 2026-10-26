@@ -114,6 +114,9 @@ enum Command {
     /// gdaladdo and gdal raster overview add/delete/refresh).
     #[command(visible_alias = "addo")]
     Overviews(cmd::overviews::Args),
+    /// Edit a GeoTIFF in place: CRS, geotransform, nodata, metadata, statistics, histograms (like
+    /// gdal raster edit and gdal_edit.py), or move its georeferencing to another CRS (gdalmove.py).
+    Edit(cmd::edit::Args),
     /// Merge raster areas smaller than a threshold into their largest neighbour (like gdal_sieve.py).
     Sieve(cmd::sieve::Args),
     /// Fill raster holes by interpolation, as gdal_fillnodata.
@@ -210,6 +213,7 @@ fn run_on_this_thread(args: Vec<OsString>, terrio: Option<Vec<OsString>>) -> i32
         Command::Pansharpen(a) => cmd::pansharpen::run(a),
         Command::Viewshed(a) => cmd::viewshed::run(a),
         Command::Overviews(a) => cmd::overviews::run(a),
+        Command::Edit(a) => cmd::edit::run(a),
         Command::Sieve(a) => cmd::sieve::run(a),
         Command::FillNodata(a) => cmd::fill_nodata::run(a),
         Command::Grid(a) => cmd::grid::run(a),
