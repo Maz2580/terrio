@@ -652,4 +652,16 @@ mod tests {
         assert_eq!(s(1102, 10000).valid_percent(), "11.02");
         assert_eq!(s(999_999, 1_000_000).valid_percent(), "99.999");
     }
+    #[test]
+    fn invalid_utf8_histogram_sidecar_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raster.tif").to_string_lossy().into_owned();
+        let cfg = wbraster::RasterConfig { cols: 2, rows: 2, data_type: DataType::U8, ..Default::default() };
+        let ds = crate::RasterDataset::new(wbraster::Raster::from_data(cfg, vec![1., 2., 3., 4.]).unwrap(), false);
+        crate::write_raster_dataset(&ds, &path, &Default::default()).unwrap();
+        let aux = format!("{path}.aux.xml");
+        std::fs::write(&aux, [0xff]).unwrap();
+        assert!(write_histograms(&path).is_err());
+        assert_eq!(std::fs::read(aux).unwrap(), [0xff]);
+    }
 }
