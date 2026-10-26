@@ -7,7 +7,10 @@
 //! Files are changed through [`update_file`]: a copy next to the original is updated, synced and
 //! renamed over it, so that an error or an interruption leaves the original as it was. Only
 //! little-endian TIFFs (those GDAL and terrio write) are updated; a classic TIFF that would grow
-//! past 4 GiB is refused.
+//! past 4 GiB is refused. Even metadata-only edits copy the complete file and need that
+//! much free space. Symlink targets are updated, and mode bits are preserved. Replacement
+//! detaches hard links and does not preserve ownership, ACLs or extended attributes; the
+//! containing directory must be writable.
 
 use super::gtiff_write::{Image, Value};
 use crate::{Error, Result};
@@ -418,7 +421,9 @@ pub(crate) fn intact_cog_layout<R: Read + Seek>(r: &mut R, big: bool) -> Result<
     let text = String::from_utf8_lossy(&body);
     let key = "KNOWN_INCOMPATIBLE_EDITION=NO";
     match (text.contains("LAYOUT=IFDS_BEFORE_DATA"), text.find(key)) {
-        (true, Some(i)) => Ok(Some(body_at + (i + key.len() - 2) as u64)),
+        (true, Some(i)) if body.get(i + key.len()..).is_some_and(|tail| tail.starts_with(b"\n ")) => {
+            Ok(Some(body_at + (i + key.len() - 2) as u64))
+        }
         _ => Ok(None),
     }
 }
@@ -456,7 +461,7 @@ pub(crate) fn writable_local_file(path: &str) -> Result<PathBuf> {
     if meta.permissions().readonly() {
         return Err(Error::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("'{}' is read-only", p.display()))));
     }
-    Ok(p)
+    Ok(std::fs::canonicalize(p)?)
 }
 
 /// A temporary file next to the file it replaces, removed unless it is persisted.
@@ -515,6 +520,8 @@ pub(crate) fn update_file<T>(path: &Path, change: impl FnOnce(&mut std::fs::File
 
 /// [`update_file`], whose `change` also gets the path of the copy it updates (to read it back).
 pub(crate) fn update_file_at<T>(path: &Path, change: impl FnOnce(&mut std::fs::File, &Path) -> Result<T>) -> Result<T> {
+    let resolved = std::fs::canonicalize(path)?;
+    let path = resolved.as_path();
     let tmp = Temporary::next_to(path)?;
     std::fs::copy(path, &tmp.path)?;
     let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&tmp.path)?;
@@ -528,9 +535,19 @@ pub(crate) fn update_file_at<T>(path: &Path, change: impl FnOnce(&mut std::fs::F
 /// Writes a new file safely: `write` fills a temporary file next to `path`, which is synced and
 /// renamed to `path` (replacing any file there) only when `write` succeeds.
 pub(crate) fn replace_file<T>(path: &Path, write: impl FnOnce(&mut std::fs::File) -> Result<T>) -> Result<T> {
+    let resolved = match std::fs::symlink_metadata(path) {
+        Ok(_) => Some(std::fs::canonicalize(path)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let path = resolved.as_deref().unwrap_or(path);
+    let permissions = std::fs::metadata(path).ok().map(|m| m.permissions());
     let tmp = Temporary::next_to(path)?;
     let mut file = std::fs::OpenOptions::new().read(true).write(true).truncate(true).open(&tmp.path)?;
     let out = write(&mut file)?;
+    if let Some(permissions) = permissions {
+        file.set_permissions(permissions)?;
+    }
     file.sync_all()?;
     drop(file);
     tmp.persist(path)?;
@@ -605,5 +622,32 @@ mod tests {
         assert!(writable_local_file(path.to_str().unwrap()).is_err());
         assert!(matches!(writable_local_file("https://example.com/a.tif"), Err(Error::Unsupported(_))));
         assert!(matches!(writable_local_file("/vsizip/a.zip/a.tif"), Err(Error::Unsupported(_))));
+    }
+    #[test]
+    fn cog_marker_requires_the_padding_it_overwrites() {
+        for (suffix, accepted) in [("\n ", true), ("\nX", false), ("", false)] {
+            let body = format!("LAYOUT=IFDS_BEFORE_DATA\nKNOWN_INCOMPATIBLE_EDITION=NO{suffix}");
+            let mut bytes = vec![0; 8];
+            bytes.extend(format!("GDAL_STRUCTURAL_METADATA_SIZE={:06} bytes\n", body.len()).as_bytes());
+            bytes.extend(body.as_bytes());
+            bytes.extend([0; 16]);
+            assert_eq!(intact_cog_layout(&mut std::io::Cursor::new(bytes), false).unwrap().is_some(), accepted);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_follows_symlinks_and_keeps_mode() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = dir.path().join("link");
+        symlink(&path, &link).unwrap();
+        replace_file(&link, |f| Ok(f.write_all(b"new")?)).unwrap();
+        assert!(std::fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(path.clone()).unwrap(), b"new");
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o640);
     }
 }

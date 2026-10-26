@@ -5,7 +5,8 @@
 //!
 //! The changed directories are appended to the file and the header pointed at them (pixels are
 //! not rewritten), through a copy renamed over the file: an error leaves it as it was. Histograms
-//! go to the `.aux.xml` sidecar, as GDAL stores them.
+//! go to the `.aux.xml` sidecar, as GDAL stores them. That sidecar is replaced atomically
+//! after the TIFF: a histogram-sidecar error can leave the TIFF edit committed.
 //!
 //! ```no_run
 //! use terrio::ops::edit::{EditOptions, edit_raster};
@@ -470,7 +471,11 @@ fn write_histograms(path: &str) -> Result<()> {
     let info = crate::info::info_path(path, &crate::info::InfoOptions { statistics: false, histogram: true })?;
     let crate::info::Info::Raster(r) = info else { return Err(Error::InvalidData("not a raster".into())) };
     let aux = std::path::PathBuf::from(format!("{path}.aux.xml"));
-    let mut xml = std::fs::read_to_string(&aux).unwrap_or_else(|_| "<PAMDataset>\n</PAMDataset>\n".into());
+    let mut xml = match std::fs::read_to_string(&aux) {
+        Ok(xml) => xml,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "<PAMDataset>\n</PAMDataset>\n".into(),
+        Err(e) => return Err(e.into()),
+    };
     for b in &r.bands {
         let Some(hist) = &b.histogram else { continue };
         let counts: Vec<String> = hist.buckets.iter().map(u64::to_string).collect();

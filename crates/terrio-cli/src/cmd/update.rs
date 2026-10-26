@@ -8,7 +8,7 @@ use terrio::ops::update::{UpdateOptions, parse_geometry, update_raster};
 /// replace the destination's where it overlaps (optionally within a geometry), and the
 /// destination's overviews are refreshed there (like gdal raster update).
 ///
-/// Only the changed blocks are rewritten, through a copy renamed over the file: an error leaves
+/// Only the changed blocks are rewritten, through a copy renamed over the file: an error before replacement leaves
 /// it as it was.
 #[derive(clap::Args)]
 pub struct Args {

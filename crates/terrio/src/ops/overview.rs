@@ -499,9 +499,11 @@ struct Schedule {
 
 /// The pixels overviews are computed from: the raster (its full-resolution image read once when
 /// whole levels are computed) and its stored overviews.
+type SharedPixels = (std::sync::Arc<RasterData>, Option<std::sync::Arc<[u8]>>);
+
 struct Sources<'a> {
     src: &'a mut LazyRaster,
-    base: Option<(RasterData, Option<Vec<u8>>)>,
+    base: Option<SharedPixels>,
     /// The alpha band (from 0), whose zeros GDAL leaves out of the other methods than nearest.
     alpha: Option<usize>,
 }
@@ -517,19 +519,19 @@ impl Sources<'_> {
         rows: std::ops::Range<usize>,
         computed: Option<&Computed>,
         want_mask: bool,
-    ) -> Result<(RasterData, Option<Vec<u8>>)> {
+    ) -> Result<SharedPixels> {
         let (w, n) = (size.0, rows.len());
         let bands = self.src.band_count();
         if let Some(c) = computed.filter(|c| c.rows.start <= rows.start && c.rows.end >= rows.end) {
             let data = slice_rows(&c.data, c.rows.len(), w, bands, rows.start - c.rows.start..rows.end - c.rows.start);
             let mask = c.mask.as_ref().map(|m| m[(rows.start - c.rows.start) * w..(rows.end - c.rows.start) * w].to_vec());
-            return Ok((data, mask));
+            return Ok((data.into(), mask.map(Into::into)));
         }
         if level.is_none() && rows == (0..size.1) {
             if self.base.is_none() {
                 let data = self.src.read()?.raster.data;
                 let mask = self.src.read_mask(Window::new(0, 0, size.0, size.1), None)?;
-                self.base = Some((data, mask));
+                self.base = Some((data.into(), mask.map(Into::into)));
             }
             let (data, mask) = self.base.as_ref().unwrap();
             return Ok((data.clone(), mask.clone().filter(|_| want_mask)));
@@ -546,7 +548,7 @@ impl Sources<'_> {
                 }
             }
         }
-        Ok((data, mask))
+        Ok((data.into(), mask.map(Into::into)))
     }
 }
 
@@ -845,6 +847,14 @@ fn shared_tags(main: &Directory, dir: &mut Directory) {
 
 /// Computes whole new levels of `sizes` (in cascade, largest first) as images like `like`
 /// (without mask images: for an `.ovr` sidecar).
+fn warn_integer_precision(data_type: DataType) {
+    if matches!(data_type, DataType::I64 | DataType::U64) {
+        crate::warnings::warn(
+            "overview arithmetic uses Float64; 64-bit integer values above 2^53 may lose precision, including nearest and mode".into(),
+        );
+    }
+}
+
 fn build_new_levels(
     src: &mut LazyRaster,
     like: &Directory,
@@ -852,6 +862,7 @@ fn build_new_levels(
     method: OverviewResampling,
     compression: &str,
 ) -> Result<Vec<gw::Image>> {
+    warn_integer_precision(src.data_type());
     let sizes = sorted_sizes(sizes.to_vec());
     let (layout, new_compression, ..) = layout_like(like, Some(compression), true, src.data_type())?;
     let blocks: Vec<(usize, usize)> = sizes.iter().map(|s| chunk_size(&layout, s.0)).collect();
@@ -1086,6 +1097,7 @@ fn delete_internal<F: Read + Write + Seek>(file: &mut F, ignore_cog_layout_break
 
 /// Refreshes the overviews of a TIFF (a GeoTIFF, or the `.ovr` of `src`).
 pub(crate) fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &RefreshOptions) -> Result<Vec<(usize, usize)>> {
+    warn_integer_precision(src.data_type());
     let tiff = gtiff_update::parse(file)?;
     gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     let im = images(&tiff);
@@ -1262,5 +1274,15 @@ mod tests {
         for invalid in ["-1", "AUTO-", "AUTO--1", "bilinear"] {
             assert!(OverviewSelection::parse(invalid).is_err());
         }
+    }
+    #[test]
+    fn whole_level_reads_share_the_pixel_buffer() {
+        let config = wbraster::RasterConfig { cols: 2, rows: 2, bands: 1, data_type: DataType::U8, ..Default::default() };
+        let raster = wbraster::Raster::from_data(config, vec![1., 2., 3., 4.]).unwrap();
+        let mut src = LazyRaster::from(crate::RasterDataset::new(raster, false));
+        let mut sources = Sources { src: &mut src, base: None, alpha: None };
+        let (a, _) = sources.rows(None, (2, 2), 0..2, None, false).unwrap();
+        let (b, _) = sources.rows(None, (2, 2), 0..2, None, false).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 }

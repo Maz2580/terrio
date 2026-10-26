@@ -4,7 +4,9 @@
 //! destination's, and the destination's overviews are refreshed there.
 //!
 //! Only the changed blocks of the destination are rewritten (appended to the file, as GDAL's
-//! GTiff driver rewrites blocks), through a copy renamed over it: an error leaves it as it was.
+//! GTiff driver rewrites blocks), through a copy renamed over it. An error before that
+//! replacement leaves the TIFF unchanged. External overviews are refreshed afterward;
+//! failure there leaves the updated TIFF committed with stale external overviews.
 
 use super::Resampling;
 use super::overview::{Computed, RefreshOptions};
@@ -180,6 +182,9 @@ fn update_tiff<F: Read + Write + Seek>(
     let warped = super::warp::warp_lazy(src, &wo)?.raster.data.to_f64_vec();
     // The destination's rows of the window, all columns, with the source's valid pixels.
     let (w, dt) = (dst.width(), dst.data_type());
+    if matches!(dt, DataType::I64 | DataType::U64) {
+        crate::warnings::warn("raster update warps through Float64; 64-bit integer values above 2^53 may lose precision".into());
+    }
     let rows = win.y..win.y + win.height;
     let mut data = dst.read_window(Window::new(0, win.y, w, win.height), &WindowOptions::default())?.raster.data;
     let n = w * win.height;
