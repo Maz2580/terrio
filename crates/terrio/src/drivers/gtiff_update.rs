@@ -510,10 +510,15 @@ impl Drop for Temporary {
 /// which is synced and renamed over the file only when `change` succeeds. On any error the file
 /// is left as it was and the copy is removed. The copy keeps the file's permissions.
 pub(crate) fn update_file<T>(path: &Path, change: impl FnOnce(&mut std::fs::File) -> Result<T>) -> Result<T> {
+    update_file_at(path, |f, _| change(f))
+}
+
+/// [`update_file`], whose `change` also gets the path of the copy it updates (to read it back).
+pub(crate) fn update_file_at<T>(path: &Path, change: impl FnOnce(&mut std::fs::File, &Path) -> Result<T>) -> Result<T> {
     let tmp = Temporary::next_to(path)?;
     std::fs::copy(path, &tmp.path)?;
     let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&tmp.path)?;
-    let out = change(&mut file)?;
+    let out = change(&mut file, &tmp.path)?;
     file.sync_all()?;
     drop(file);
     tmp.persist(path)?;

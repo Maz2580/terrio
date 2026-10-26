@@ -120,6 +120,8 @@ enum Command {
     /// Create a raster filled with burn values, from scratch or like a template (like gdal raster
     /// create and gdal_create).
     Create(cmd::create::Args),
+    /// Write a raster into an existing GeoTIFF, reprojected to its grid (like gdal raster update).
+    Update(cmd::update::Args),
     /// Merge raster areas smaller than a threshold into their largest neighbour (like gdal_sieve.py).
     Sieve(cmd::sieve::Args),
     /// Fill raster holes by interpolation, as gdal_fillnodata.
@@ -218,6 +220,7 @@ fn run_on_this_thread(args: Vec<OsString>, terrio: Option<Vec<OsString>>) -> i32
         Command::Overviews(a) => cmd::overviews::run(a),
         Command::Edit(a) => cmd::edit::run(a),
         Command::Create(a) => cmd::create::run(a),
+        Command::Update(a) => cmd::update::run(a),
         Command::Sieve(a) => cmd::sieve::run(a),
         Command::FillNodata(a) => cmd::fill_nodata::run(a),
         Command::Grid(a) => cmd::grid::run(a),

@@ -480,11 +480,11 @@ fn chunk_size(layout: &Layout, cols: usize) -> (usize, usize) {
 
 /// One overview level being computed: its pixels over rows `rows` (all columns), and its mask
 /// (255 valid) over the same rows when the raster has a per-dataset mask.
-struct Computed {
-    size: (usize, usize),
-    rows: std::ops::Range<usize>,
-    data: RasterData,
-    mask: Option<Vec<u8>>,
+pub(crate) struct Computed {
+    pub(crate) size: (usize, usize),
+    pub(crate) rows: std::ops::Range<usize>,
+    pub(crate) data: RasterData,
+    pub(crate) mask: Option<Vec<u8>>,
 }
 
 /// How GDAL schedules the computation of a level.
@@ -1003,7 +1003,7 @@ fn add_internal<F: Read + Write + Seek>(
 /// Re-encodes the chunks of `dir` (an overview, or with `mask_of` the mask of that overview)
 /// that rows `c.rows` and columns `cols` of the computed level cover, and returns the directory
 /// pointing at them (and at the old chunks elsewhere).
-fn replace_chunks<F: Write + Seek>(
+pub(crate) fn replace_chunks<F: Write + Seek>(
     a: &mut Appender<'_, F>,
     dir: &Directory,
     c: &Computed,
@@ -1085,7 +1085,7 @@ fn delete_internal<F: Read + Write + Seek>(file: &mut F, ignore_cog_layout_break
 }
 
 /// Refreshes the overviews of a TIFF (a GeoTIFF, or the `.ovr` of `src`).
-fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &RefreshOptions) -> Result<Vec<(usize, usize)>> {
+pub(crate) fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &RefreshOptions) -> Result<Vec<(usize, usize)>> {
     let tiff = gtiff_update::parse(file)?;
     gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     let im = images(&tiff);
