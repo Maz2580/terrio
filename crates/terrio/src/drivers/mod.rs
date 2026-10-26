@@ -19,6 +19,7 @@ pub(crate) mod gpkg;
 #[cfg(feature = "grib")]
 pub(crate) mod grib;
 mod gsbg;
+pub(crate) mod gtiff_update;
 pub(crate) mod gtiff_write;
 #[cfg(feature = "netcdf-hdf5")]
 pub(crate) mod hdf5;

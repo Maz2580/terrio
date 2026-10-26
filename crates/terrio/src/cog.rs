@@ -132,6 +132,9 @@ pub struct LazyRaster {
     /// GDAL's external mask, the `.msk` sidecar of a local file without an internal mask: a TIFF
     /// whose first band is the per-dataset mask, with overviews of its own.
     sidecar_mask: Option<Box<LazyRaster>>,
+    /// GDAL's external overviews, the `.ovr` sidecar of a local GeoTIFF without internal ones:
+    /// a TIFF whose images are the overviews, largest first.
+    sidecar_overviews: Option<Box<LazyRaster>>,
 }
 
 impl std::fmt::Debug for LazyRaster {
@@ -270,14 +273,14 @@ impl LazyRaster {
         if let Inner::Memory(ds) = &self.inner {
             let inner = Inner::Memory(ds.clone());
             let sidecar_mask = self.sidecar_mask.as_mut().map(|m| Box::new(m.shared()));
-            return Self { inner, sidecar_mask };
+            return Self { inner, sidecar_mask, sidecar_overviews: None };
         }
         if let Inner::Source(header, source) = &self.inner
             && let Some(source) = source.shared_clone()
         {
             let inner = Inner::Source(header.clone(), source);
             let sidecar_mask = self.sidecar_mask.as_mut().map(|m| Box::new(m.shared()));
-            return Self { inner, sidecar_mask };
+            return Self { inner, sidecar_mask, sidecar_overviews: None };
         }
         let mut header = self.header();
         if let Inner::Tiff(t) = &self.inner {
@@ -309,26 +312,10 @@ impl LazyRaster {
         if let Some(mask) = &self.sidecar_mask {
             paths.extend(mask.input_paths()?);
         }
-        Ok(paths)
-    }
-
-    /// The files the dataset is read from, as GDAL's `GetFileList` lists them: for a GeoTIFF, the
-    /// file as it was named (a path, URL or archive member), the `.ovr` whose overviews it took,
-    /// the `.msk` sidecar mask and the `.aux.xml` sidecar whose CRS or nodata it took; the files
-    /// of a VRT or catalog's sources. Empty for rasters in memory or read from a
-    /// [`crate::sparse::SparseFile`]. Unlike GDAL's, the list has no RPC sidecar.
-    pub fn file_list(&self) -> Result<Vec<String>> {
-        let mut files = match &self.inner {
-            Inner::Tiff(t) => t.files.clone(),
-            Inner::Memory(_) => Vec::new(),
-            Inner::Source(..) => return self.input_paths(),
-        };
-        // As GDAL lists them: the file, its `.ovr`, its `.msk`, then its `.aux.xml`.
-        if let Some(mask) = &self.sidecar_mask {
-            let at = files.iter().position(|f| f.ends_with(".aux.xml")).unwrap_or(files.len());
-            files.splice(at..at, mask.file_list()?);
+        if let Some(ovr) = &self.sidecar_overviews {
+            paths.extend(ovr.input_paths()?);
         }
-        Ok(files)
+        Ok(paths)
     }
 
     /// Opens a raster: a path, URL, `s3://`, `gs://` or `az://` object, or zip archive member.
@@ -337,7 +324,33 @@ impl LazyRaster {
     pub fn open(path: &str) -> Result<Self> {
         let mut r = Self::open_without_sidecars(path)?;
         r.find_sidecar_mask(path);
+        r.find_sidecar_overviews(path);
         Ok(r)
+    }
+
+    /// Attaches the `.ovr` sidecar of a local GeoTIFF without internal overviews (GDAL's external
+    /// overviews, as `gdaladdo -ro` writes them), when its images have the raster's bands and
+    /// data type and are smaller than it.
+    fn find_sidecar_overviews(&mut self, path: &str) {
+        let Inner::Tiff(t) = &self.inner else { return };
+        if t.levels.len() > 1 || !Location::parse(path).is_local() {
+            return;
+        }
+        let ovr = format!("{path}.ovr");
+        if !std::path::Path::new(&ovr).is_file() {
+            return;
+        }
+        match Self::open_tiff(&ovr) {
+            Ok(Some(o))
+                if o.band_count() == self.band_count()
+                    && o.data_type() == self.data_type()
+                    && o.width() < self.width().max(2)
+                    && o.height() <= self.height() =>
+            {
+                self.sidecar_overviews = Some(Box::new(o));
+            }
+            _ => crate::warnings::warn(format!("{ovr} is not an overview file of {path}: it is ignored")),
+        }
     }
 
     /// Attaches the `.msk` sidecar of a local file (`dem.tif.msk`, as GDAL writes it when
@@ -358,11 +371,7 @@ impl LazyRaster {
                 .find(|(k, _)| k == "INTERNAL_MASK_FLAGS_1")
                 .is_none_or(|(_, v)| v.trim().parse::<u32>().is_ok_and(|f| f & 2 != 0))
         });
-        let limits = match &self.inner {
-            Inner::Tiff(t) => t.limits,
-            _ => TiffReadLimits::default(),
-        };
-        if let Ok(Some(m)) = Self::open_tiff_with_limits(&msk, limits)
+        if let Ok(Some(m)) = Self::open_tiff(&msk)
             && per_dataset
             && (m.width(), m.height()) == (self.width(), self.height())
         {
@@ -389,7 +398,7 @@ impl LazyRaster {
         }
         match Self::open_tiff(path)? {
             Some(r) => Ok(r),
-            None => crate::open_raster(path).map(|ds| Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None }),
+            None => crate::open_raster(path).map(|ds| Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None, sidecar_overviews: None }),
         }
     }
 
@@ -420,20 +429,12 @@ impl LazyRaster {
             return Ok(None);
         }
         let mut t = TiffRaster::new(source, local, limits)?;
-        t.files.push(path.to_string());
-        if let Location::Local(p) = &loc
-            && t.tags.apply_sidecar_crs(p)
-        {
-            t.files.push(format!("{path}.aux.xml"));
+        if let Location::Local(p) = &loc {
+            t.tags.apply_sidecar_crs(p);
         }
         t.tags.warn_unreadable(path);
         t.file = file;
-        if let Location::Local(p) = &loc {
-            let mut ovr = p.as_os_str().to_owned();
-            ovr.push(".ovr");
-            t.attach_ovr(std::path::Path::new(&ovr));
-        }
-        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None }))
+        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None, sidecar_overviews: None }))
     }
 
     /// Opens a GeoTIFF held in memory, reading only its headers now. Returns `None` when the bytes
@@ -450,7 +451,7 @@ impl LazyRaster {
         }
         let t = TiffRaster::new(source, None, limits)?;
         t.tags.warn_unreadable("a GeoTIFF in memory");
-        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None }))
+        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None, sidecar_overviews: None }))
     }
 
     /// Opens a remote GeoTIFF whose bytes the caller fetches (see [`crate::sparse`]), reading
@@ -472,7 +473,7 @@ impl LazyRaster {
         source.seek(SeekFrom::Start(0))?;
         let t = TiffRaster::new(source, None, limits)?;
         t.tags.warn_unreadable("a remote GeoTIFF");
-        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None }))
+        Ok(Some(Self { inner: Inner::Tiff(Box::new(t)), sidecar_mask: None, sidecar_overviews: None }))
     }
 
     /// Opens an archive of image tiles (PMTiles or MBTiles) for reading by window, zoom levels
@@ -488,20 +489,6 @@ impl LazyRaster {
         match &self.inner {
             Inner::Tiff(_) | Inner::Source(..) => None,
             Inner::Memory(ds) => Some(ds),
-        }
-    }
-
-    /// The RPCs of a GeoTIFF, as GDAL reads them: its `RPCCoefficientTag`, else (for a local
-    /// file) a `_RPC.TXT` or `.RPB` sidecar. Also for GeoTIFFs in memory and sparse ones, which
-    /// have the tag alone. `None` without RPCs, and for other formats.
-    pub fn rpc(&self) -> Result<Option<crate::ops::rpc::Rpc>> {
-        let Inner::Tiff(t) = &self.inner else { return Ok(None) };
-        if let Some(tag) = &t.tags.rpc {
-            return crate::ops::rpc::Rpc::from_tiff_tag(tag).map(Some);
-        }
-        match &t.file {
-            Some(path) => crate::ops::rpc::rpc_sidecar(path),
-            None => Ok(None),
         }
     }
 
@@ -562,17 +549,6 @@ impl LazyRaster {
         }
     }
 
-    /// The bits of a sample as a TIFF stores them (its `BitsPerSample`); `None` for other
-    /// sources. Samples may be read as a wider [`LazyRaster::data_type`], as GDAL reads them:
-    /// Float16 (16 bits, read as Float32; GDAL's Float16) and unsigned samples of 1 to 7 or 9 to
-    /// 31 bits (GDAL's `NBITS`).
-    pub fn sample_bits(&self) -> Option<u16> {
-        match &self.inner {
-            Inner::Tiff(t) => Some(t.bits),
-            Inner::Memory(_) | Inner::Source(..) => None,
-        }
-    }
-
     /// The driver.
     pub fn driver(&self) -> RasterDriver {
         match &self.inner {
@@ -627,6 +603,11 @@ impl LazyRaster {
 
     /// The sizes `(width, height)` of the overviews, largest first.
     pub fn overviews(&self) -> Vec<(usize, usize)> {
+        if let Some(o) = &self.sidecar_overviews {
+            let mut sizes = vec![(o.width(), o.height())];
+            sizes.extend(o.overviews());
+            return sizes;
+        }
         match &self.inner {
             Inner::Tiff(t) => t.levels[1..].iter().map(|l| (l.width, l.height)).collect(),
             Inner::Memory(_) => Vec::new(),
@@ -809,17 +790,20 @@ impl LazyRaster {
         if let Some(b) = bands.iter().find(|b| **b == 0 || **b > self.band_count()) {
             return Err(Error::InvalidArgument(format!("no band {b}: the raster has {} band(s)", self.band_count())));
         }
-        let band_nodata: Vec<Option<f64>> = if let Inner::Tiff(t) = &self.inner {
-            let tags = t.tags_at_level(options.overview.map_or(0, |i| i + 1));
-            bands.iter().map(|b| tags.band_nodata.iter().find(|(i, _)| i == b).map(|(_, v)| *v).or(tags.nodata)).collect()
-        } else {
-            bands.iter().map(|b| self.band_nodata(*b)).collect()
-        };
+        let band_nodata: Vec<Option<f64>> = bands.iter().map(|b| self.band_nodata(*b)).collect();
         let gt = self.level_geo_transform(options.overview)?;
+        // An overview of the `.ovr` sidecar.
+        let external = match (options.overview, self.sidecar_overviews.as_mut()) {
+            (Some(i), Some(o)) => Some(o.read_window(window, &WindowOptions { bands: bands.clone(), overview: i.checked_sub(1) })?.raster.data),
+            _ => None,
+        };
         let (data, nodata, has_nodata, crs) = match &mut self.inner {
             Inner::Tiff(t) => {
                 let level = options.overview.map_or(0, |i| i + 1);
-                let data = t.read(level, window, &bands)?;
+                let data = match external {
+                    Some(data) => data,
+                    None => t.read(level, window, &bands)?,
+                };
                 (data, t.tags.nodata.unwrap_or(-9999.0), t.tags.nodata.is_some(), Some(t.tags.crs_info()))
             }
             Inner::Memory(ds) => (cut(&ds.raster, window, &bands), ds.raster.nodata, ds.has_nodata, Some(ds.raster.crs.clone())),
@@ -890,13 +874,7 @@ impl LazyRaster {
                 window.width, window.height, window.x, window.y
             )));
         }
-        // An external overview is its own TIFF dataset. GDAL does not inherit
-        // the base TIFF's mask when that dataset has no mask of its own.
-        if let Inner::Tiff(t) = &mut self.inner
-            && t.levels[overview.map_or(0, |i| i + 1)].external.is_some()
-        {
-            return read_tiff_mask(t, window, overview.map_or(0, |i| i + 1));
-        }
+        let (fw, fh) = (self.width(), self.height());
         if let Some(m) = self.sidecar_mask.as_mut() {
             return read_sidecar_mask(m, window, (lw, lh)).map(Some);
         }
@@ -904,12 +882,33 @@ impl LazyRaster {
             return source.read_mask(overview.map_or(0, |i| i + 1), window);
         }
         let Inner::Tiff(t) = &mut self.inner else { return Ok(None) };
-        read_tiff_mask(t, window, overview.map_or(0, |i| i + 1))
+        let w = (window.x, window.y, window.width, window.height);
+        let own = t.masks.iter().find(|m| m.overview == overview.is_some() && (m.width, m.height) == (lw, lh)).cloned();
+        let reader = t.decoder.inner();
+        if let Some(m) = own {
+            return crate::tiff_mask::read_mask(reader, &m, w).map(Some);
+        }
+        let Some(full) = t.masks.iter().find(|m| !m.overview && (m.width, m.height) == (fw, fh)).cloned() else { return Ok(None) };
+        // Nearest neighbour from the full-resolution mask.
+        let (sx, sy) = (fw as f64 / lw as f64, fh as f64 / lh as f64);
+        let col = |c: usize| (((c as f64 + 0.5) * sx) as usize).min(fw - 1);
+        let row = |r: usize| (((r as f64 + 0.5) * sy) as usize).min(fh - 1);
+        let (c0, c1) = (col(window.x), col(window.x + window.width - 1));
+        let (r0, r1) = (row(window.y), row(window.y + window.height - 1));
+        let src = crate::tiff_mask::read_mask(reader, &full, (c0, r0, c1 - c0 + 1, r1 - r0 + 1))?;
+        let sw = c1 - c0 + 1;
+        let mut out = Vec::with_capacity(window.width * window.height);
+        for r in window.y..window.y + window.height {
+            for c in window.x..window.x + window.width {
+                out.push(src[(row(r) - r0) * sw + col(c) - c0]);
+            }
+        }
+        Ok(Some(out))
     }
 
     /// A raster read by window by `source`, described by `header` (a dataset without pixels).
     pub(crate) fn from_source(header: RasterDataset, source: Box<dyn WindowSource>) -> Self {
-        Self { inner: Inner::Source(Arc::new(header), source), sidecar_mask: None }
+        Self { inner: Inner::Source(Arc::new(header), source), sidecar_mask: None, sidecar_overviews: None }
     }
 
     /// Wraps an archive of image tiles (PMTiles, MBTiles), its zoom levels as overviews.
@@ -922,44 +921,8 @@ impl LazyRaster {
 impl From<RasterDataset> for LazyRaster {
     /// Wraps a raster in memory, so that it is read by window like a lazy one.
     fn from(ds: RasterDataset) -> Self {
-        Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None }
+        Self { inner: Inner::Memory(Arc::new(ds)), sidecar_mask: None, sidecar_overviews: None }
     }
-}
-
-/// A TIFF level's own mask, then its full-resolution mask as a nearest fallback.
-fn read_tiff_mask(t: &mut TiffRaster, window: Window, level: usize) -> Result<Option<Vec<u8>>> {
-    if let Some(i) = t.levels[level].external
-        && let Some(ovr) = t.ovr.as_mut()
-    {
-        if let Some(mask) = t.ovr_mask.as_mut() {
-            return read_sidecar_mask(mask, window, (ovr.levels[i].width, ovr.levels[i].height)).map(Some);
-        }
-        return read_tiff_mask(ovr, window, i);
-    }
-    let (lw, lh) = (t.levels[level].width, t.levels[level].height);
-    let (fw, fh) = (t.levels[0].width, t.levels[0].height);
-    let w = (window.x, window.y, window.width, window.height);
-    let own = t.masks.iter().find(|m| m.overview == (level > 0) && (m.width, m.height) == (lw, lh)).cloned();
-    let reader = t.decoder.inner();
-    if let Some(m) = own {
-        return crate::tiff_mask::read_mask(reader, &m, w).map(Some);
-    }
-    let Some(full) = t.masks.iter().find(|m| !m.overview && (m.width, m.height) == (fw, fh)).cloned() else { return Ok(None) };
-    // Nearest neighbour from the full-resolution mask.
-    let (sx, sy) = (fw as f64 / lw as f64, fh as f64 / lh as f64);
-    let col = |c: usize| (((c as f64 + 0.5) * sx) as usize).min(fw - 1);
-    let row = |r: usize| (((r as f64 + 0.5) * sy) as usize).min(fh - 1);
-    let (c0, c1) = (col(window.x), col(window.x + window.width - 1));
-    let (r0, r1) = (row(window.y), row(window.y + window.height - 1));
-    let src = crate::tiff_mask::read_mask(reader, &full, (c0, r0, c1 - c0 + 1, r1 - r0 + 1))?;
-    let sw = c1 - c0 + 1;
-    let mut out = Vec::with_capacity(window.width * window.height);
-    for r in window.y..window.y + window.height {
-        for c in window.x..window.x + window.width {
-            out.push(src[(row(r) - r0) * sw + col(c) - c0]);
-        }
-    }
-    Ok(Some(out))
 }
 
 /// Reads a window of a `.msk` sidecar's mask at a level of size `(lw, lh)`: the sidecar's own
@@ -1094,9 +1057,6 @@ struct Level {
     height: usize,
     /// The tile or strip size.
     block: (usize, usize),
-    /// The level of the `.ovr` file (see [`TiffRaster::ovr`]) this one is, rather than an image
-    /// of this file.
-    external: Option<usize>,
 }
 
 struct TiffRaster {
@@ -1104,8 +1064,6 @@ struct TiffRaster {
     tags: GeoTags,
     bands: usize,
     data_type: DataType,
-    /// `BitsPerSample` of the full-resolution image.
-    bits: u16,
     geo_transform: [f64; 6],
     /// The full-resolution image, then the overviews, largest first.
     levels: Vec<Level>,
@@ -1120,12 +1078,6 @@ struct TiffRaster {
     file: Option<std::path::PathBuf>,
     /// The decoders' limits.
     limits: TiffReadLimits,
-    /// The files [`LazyRaster::file_list`] lists: the TIFF as it was named, and the sidecars read.
-    files: Vec<String>,
-    /// The external overviews (`.ovr` file) of a file without internal ones.
-    ovr: Option<Box<TiffRaster>>,
-    /// The external overview dataset's per-dataset `.ovr.msk`, if present.
-    ovr_mask: Option<Box<LazyRaster>>,
 }
 
 /// What more decoders of a TIFF read: its local file, or its bytes in memory.
@@ -1151,9 +1103,8 @@ impl TiffRaster {
         let (w, h) = dec.dimensions().map_err(tiff_err)?;
         let bands = dec.find_tag_unsigned::<u16>(Tag::SamplesPerPixel).map_err(tiff_err)?.unwrap_or(1).max(1) as usize;
         let data_type = sample_type(&mut dec)?;
-        let bits = dec.find_tag_unsigned_vec::<u16>(Tag::BitsPerSample).map_err(tiff_err)?.and_then(|v| v.first().copied()).unwrap_or(1);
         let (cw, ch) = dec.chunk_dimensions();
-        let mut levels = vec![Level { ifd: 0, width: w as usize, height: h as usize, block: (cw as usize, ch as usize), external: None }];
+        let mut levels = vec![Level { ifd: 0, width: w as usize, height: h as usize, block: (cw as usize, ch as usize) }];
         let mut ifd = 1;
         while dec.more_images() && ifd < MAX_IMAGES {
             // Images the decoder cannot read (such as unusual masks) are skipped.
@@ -1165,7 +1116,7 @@ impl TiffRaster {
                 if subfile & 1 == 1 && subfile & 4 == 0 && samples == bands && same_type {
                     let (ow, oh) = dec.dimensions().map_err(tiff_err)?;
                     let (cw, ch) = dec.chunk_dimensions();
-                    levels.push(Level { ifd, width: ow as usize, height: oh as usize, block: (cw as usize, ch as usize), external: None });
+                    levels.push(Level { ifd, width: ow as usize, height: oh as usize, block: (cw as usize, ch as usize) });
                 }
             }
             ifd += 1;
@@ -1177,71 +1128,11 @@ impl TiffRaster {
         // As the in-memory reader does without georeferencing: unit pixels, with the image's
         // bottom at y = 0.
         let geo_transform = tags.corner_geo_transform().unwrap_or([0.0, 1.0, 0.0, h as f64, 0.0, -1.0]);
-        Ok(Self {
-            decoder: dec,
-            tags,
-            bands,
-            data_type,
-            bits,
-            geo_transform,
-            levels,
-            masks,
-            current_ifd: 0,
-            _local: local,
-            file: None,
-            limits,
-            files: Vec::new(),
-            ovr: None,
-            ovr_mask: None,
-        })
-    }
-
-    /// Takes the images of a GDAL `.ovr` file as overviews, as GDAL does when the TIFF has none
-    /// of its own, when they have the TIFF's bands and type.
-    fn attach_ovr(&mut self, path: &std::path::Path) {
-        if self.levels.len() > 1 || !path.is_file() {
-            return;
-        }
-        let Ok(file) = std::fs::File::open(path) else { return };
-        let Ok(mut ovr) = TiffRaster::new(Source::File(BufReader::new(file)), None, self.limits) else { return };
-        if ovr.bands != self.bands || ovr.data_type != self.data_type {
-            return;
-        }
-        ovr.file = Some(path.to_path_buf());
-        for (i, l) in ovr.levels.iter().enumerate() {
-            // GDAL accepts all matching-band/type images, including irregular,
-            // equal-sized and larger images; there is no reduction-factor gate.
-            self.levels.push(Level { ifd: l.ifd, width: l.width, height: l.height, block: l.block, external: Some(i) });
-        }
-        self.levels[1..].sort_by_key(|l| std::cmp::Reverse((l.width, l.height)));
-        // Use the same sidecar-mask policy as a local base TIFF. This probes
-        // `.ovr.msk` only when an external overview was actually opened.
-        ovr.files.push(path.to_string_lossy().into_owned());
-        let mut view = LazyRaster { inner: Inner::Tiff(Box::new(ovr)), sidecar_mask: None };
-        view.find_sidecar_mask(&path.to_string_lossy());
-        let files = view.file_list().unwrap_or_else(|_| vec![path.to_string_lossy().into_owned()]);
-        // Listed after the TIFF, as GDAL lists it.
-        let at = self.files.len().min(1);
-        self.files.splice(at..at, files);
-        self.ovr_mask = view.sidecar_mask;
-        let Inner::Tiff(ovr) = view.inner else { unreachable!() };
-        self.ovr = Some(ovr);
-    }
-
-    fn tags_at_level(&self, level: usize) -> &GeoTags {
-        match (self.levels[level].external, self.ovr.as_ref()) {
-            (Some(i), Some(ovr)) => ovr.tags_at_level(i),
-            _ => &self.tags,
-        }
+        Ok(Self { decoder: dec, tags, bands, data_type, geo_transform, levels, masks, current_ifd: 0, _local: local, file: None, limits })
     }
 
     /// Reads a window of some bands (numbered from 1) of a level, band-major.
     fn read(&mut self, level: usize, w: Window, bands: &[usize]) -> Result<RasterData> {
-        if let Some(i) = self.levels[level].external
-            && let Some(ovr) = self.ovr.as_mut()
-        {
-            return ovr.read(i, w, bands);
-        }
         let len = bands
             .len()
             .checked_mul(w.width)
@@ -1289,7 +1180,7 @@ impl TiffRaster {
         dec.inner().get_ref().prefetch(&ranges)?;
 
         // Missing (sparse) chunks read as nodata, or 0, as in GDAL.
-        let mut out = try_new_filled(self.data_type, len, self.tags.nodata.unwrap_or(0.0))?;
+        let mut out = RasterData::new_filled(self.data_type, len, self.tags.nodata.unwrap_or(0.0));
         let spp = if planar { 1 } else { self.bands };
         // Chunks with data, and where they go.
         let mut wanted: Vec<u32> = Vec::with_capacity(chunks.len());
@@ -1401,29 +1292,6 @@ pub(crate) fn place<T: Copy>(out: &mut [T], vals: &[T], g: &ChunkGeom, w: Window
     }
 }
 
-/// [`RasterData::new_filled`], or an error when the samples cannot be allocated: a header can
-/// declare an image of terabytes, whose full window would abort the process.
-fn try_new_filled(data_type: DataType, len: usize, value: f64) -> Result<RasterData> {
-    fn filled<T: Clone>(len: usize, value: T) -> Result<Vec<T>> {
-        let mut v = Vec::new();
-        v.try_reserve_exact(len).map_err(|_| Error::InvalidArgument(format!("a window of {len} samples is too large to allocate")))?;
-        v.resize(len, value);
-        Ok(v)
-    }
-    Ok(match data_type {
-        DataType::U8 => RasterData::U8(filled(len, value as u8)?),
-        DataType::I8 => RasterData::I8(filled(len, value as i8)?),
-        DataType::U16 => RasterData::U16(filled(len, value as u16)?),
-        DataType::I16 => RasterData::I16(filled(len, value as i16)?),
-        DataType::U32 => RasterData::U32(filled(len, value as u32)?),
-        DataType::I32 => RasterData::I32(filled(len, value as i32)?),
-        DataType::U64 => RasterData::U64(filled(len, value as u64)?),
-        DataType::I64 => RasterData::I64(filled(len, value as i64)?),
-        DataType::F32 => RasterData::F32(filled(len, value as f32)?),
-        DataType::F64 => RasterData::F64(filled(len, value)?),
-    })
-}
-
 /// The pixel type of the decoder's current image, from `BitsPerSample` and `SampleFormat`.
 fn sample_type<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<DataType> {
     let bits = dec.find_tag_unsigned_vec::<u16>(Tag::BitsPerSample).map_err(tiff_err)?.and_then(|v| v.first().copied()).unwrap_or(1);
@@ -1446,12 +1314,6 @@ fn sample_type<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<DataType> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn window_allocation_capacity_overflow_returns_an_error() {
-        let error = super::try_new_filled(crate::DataType::F64, usize::MAX, 0.0).unwrap_err();
-        assert!(matches!(error, crate::Error::InvalidArgument(ref message) if message.contains("too large to allocate")));
-    }
-
     use super::*;
 
     #[test]

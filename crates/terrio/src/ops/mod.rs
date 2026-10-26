@@ -37,6 +37,7 @@ pub mod geometry;
 pub mod hull;
 pub mod mosaic;
 pub mod overview;
+pub(crate) mod overview_kernel;
 pub mod pansharpen;
 pub mod polygonize;
 pub mod proximity;

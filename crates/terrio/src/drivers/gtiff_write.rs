@@ -79,7 +79,29 @@ impl Compression {
         })
     }
 
-    fn code(self) -> u16 {
+    /// The compression of a TIFF `Compression` tag value, with the second `LercParameters`
+    /// value for LERC. `None` for compressions this writer does not encode.
+    pub(crate) fn from_tiff(code: u16, lerc: Option<u64>) -> Option<Self> {
+        Some(match code {
+            1 => Self::None,
+            5 => Self::Lzw,
+            8 | 32946 => Self::Deflate,
+            32773 => Self::PackBits,
+            50000 => Self::Zstd,
+            34887 => match lerc.unwrap_or(0) {
+                0 => Self::Lerc,
+                1 => Self::LercDeflate,
+                2 => Self::LercZstd,
+                _ => return None,
+            },
+            50002 => Self::Jxl,
+            7 => Self::Jpeg,
+            50001 => Self::WebP,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn code(self) -> u16 {
         match self {
             Self::None => 1,
             Self::Lzw => 5,
@@ -94,7 +116,7 @@ impl Compression {
     }
 
     /// Whether the compression takes the TIFF predictor.
-    fn takes_predictor(self) -> bool {
+    pub(crate) fn takes_predictor(self) -> bool {
         matches!(self, Self::Lzw | Self::Deflate | Self::Zstd)
     }
 
@@ -444,7 +466,18 @@ pub(crate) enum OverviewResampling {
 }
 
 impl OverviewResampling {
-    fn parse(s: &str) -> Result<Self> {
+    /// GDAL's name for the method, as its overviews' `RESAMPLING` metadata item holds it.
+    pub(crate) fn gdal_name(self) -> &'static str {
+        match self {
+            Self::Nearest => "NEAREST",
+            Self::Average => "AVERAGE",
+            Self::Min => "MIN",
+            Self::Max => "MAX",
+            Self::Mode => "MODE",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Result<Self> {
         Ok(match s.to_ascii_lowercase().as_str() {
             "near" | "nearest" => Self::Nearest,
             "average" => Self::Average,
@@ -622,7 +655,7 @@ const LONG8: u16 = 16;
 
 /// A tag's values.
 #[derive(Clone)]
-enum Value {
+pub(crate) enum Value {
     Shorts(Vec<u16>),
     /// Offsets or counts: LONG in classic TIFF, LONG8 in BigTIFF.
     Offsets(Vec<u64>),
@@ -632,7 +665,7 @@ enum Value {
 }
 
 impl Value {
-    fn encode(&self, big: bool) -> (u16, u64, Vec<u8>) {
+    pub(crate) fn encode(&self, big: bool) -> (u16, u64, Vec<u8>) {
         match self {
             Value::Shorts(v) => (SHORT, v.len() as u64, v.iter().flat_map(|x| x.to_le_bytes()).collect()),
             Value::Longs(v) => (LONG, v.len() as u64, v.iter().flat_map(|x| x.to_le_bytes()).collect()),
@@ -650,10 +683,10 @@ impl Value {
 
 /// One image (full resolution or overview) ready to be written: its tags without the chunk
 /// offsets, and its compressed chunks.
-struct Image {
-    tags: Vec<(u16, Value)>,
-    chunks: Vec<Vec<u8>>,
-    tiled: bool,
+pub(crate) struct Image {
+    pub(crate) tags: Vec<(u16, Value)>,
+    pub(crate) chunks: Vec<Vec<u8>>,
+    pub(crate) tiled: bool,
 }
 
 /// Writes a raster as a GeoTIFF or COG.
@@ -833,6 +866,12 @@ fn plan(raster: &Raster, opts: &TiffOptions) -> Result<Plan> {
     Ok(Plan { tile, layout, geo, color_map })
 }
 
+/// The georeferencing, nodata and metadata tags [`write`] gives the full-resolution image of
+/// `raster` (only its header is read) with these options.
+pub(crate) fn georeferencing_tags(raster: &Raster, opts: &TiffOptions) -> Result<Vec<(u16, Value)>> {
+    Ok(plan(raster, opts)?.geo)
+}
+
 fn prepare(raster: &Raster, opts: &TiffOptions) -> Result<Prepared> {
     let Plan { tile, layout, geo, color_map } = plan(raster, opts)?;
     if let Some(m) = &opts.mask
@@ -928,7 +967,7 @@ fn prepare(raster: &Raster, opts: &TiffOptions) -> Result<Prepared> {
 /// GDAL's internal mask (`GDAL_TIFF_INTERNAL_MASK`): a 1-bit transparency mask image
 /// (`NewSubfileType` 4, `PhotometricInterpretation` 4) in the blocks of the image it masks
 /// (`block`: width, height, tiled), Deflate compressed, bits set for valid pixels.
-fn mask_image(mask: &[u8], cols: usize, rows: usize, block: (usize, usize, bool)) -> Result<Image> {
+pub(crate) fn mask_image(mask: &[u8], cols: usize, rows: usize, block: (usize, usize, bool)) -> Result<Image> {
     let compression = Compression::Deflate;
     let (chunk_w, chunk_h, tiled) = block;
     let (across, down) = (cols.div_ceil(chunk_w), rows.div_ceil(chunk_h));
@@ -986,31 +1025,31 @@ fn color_map_tag(table: &[[u8; 4]], t: DataType) -> Value {
 
 /// How the pixels are laid out in the file.
 #[derive(Clone)]
-struct Layout {
+pub(crate) struct Layout {
     /// Tile width and height; strips when `None`.
-    tile: Option<(u32, u32)>,
-    rows_per_strip: Option<u32>,
+    pub(crate) tile: Option<(u32, u32)>,
+    pub(crate) rows_per_strip: Option<u32>,
     /// One plane per band.
-    planar: bool,
-    photometric: u16,
+    pub(crate) planar: bool,
+    pub(crate) photometric: u16,
     /// The `ExtraSamples` values of the samples besides the color ones.
-    extra: Vec<u16>,
+    pub(crate) extra: Vec<u16>,
     /// The TIFF predictor.
-    predictor: u16,
+    pub(crate) predictor: u16,
     /// The bands per TIFF sample: 2 for complex samples (real and imaginary parts), else 1.
-    parts: usize,
+    pub(crate) parts: usize,
 }
 
 /// One resolution level's pixels, band-major: the raster's own, or an overview's.
-struct Level<'a> {
-    cols: usize,
-    rows: usize,
-    bands: usize,
-    data: std::borrow::Cow<'a, RasterData>,
+pub(crate) struct Level<'a> {
+    pub(crate) cols: usize,
+    pub(crate) rows: usize,
+    pub(crate) bands: usize,
+    pub(crate) data: std::borrow::Cow<'a, RasterData>,
 }
 
 impl<'a> Level<'a> {
-    fn from_raster(r: &'a Raster) -> Self {
+    pub(crate) fn from_raster(r: &'a Raster) -> Self {
         Self { cols: r.cols, rows: r.rows, bands: r.bands, data: std::borrow::Cow::Borrowed(&r.data) }
     }
 
@@ -1027,7 +1066,7 @@ impl<'a> Level<'a> {
     }
 
     /// Splits the level into compressed strips or tiles, with its structural tags.
-    fn image(&self, t: DataType, compression: Compression, codec: &CodecParams, layout: &Layout) -> Result<Image> {
+    pub(crate) fn image(&self, t: DataType, compression: Compression, codec: &CodecParams, layout: &Layout) -> Result<Image> {
         let parts = layout.parts;
         // The size of a sample's part, and the TIFF samples per pixel.
         let size = t.size_bytes();

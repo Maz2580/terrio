@@ -71,3 +71,16 @@ pub fn open(path: &str) -> terrio::Result<RasterDataset> {
 pub fn srs(s: &Option<String>) -> terrio::Result<Option<terrio::crs::SpatialRef>> {
     s.as_deref().map(terrio::crs::SpatialRef::parse).transpose()
 }
+
+/// Parses a bounding box `xmin,ymin,xmax,ymax`, as GDAL's `--bbox` takes it.
+pub fn parse_bbox(s: &str) -> terrio::Result<[f64; 4]> {
+    let v: Vec<f64> = s
+        .split(',')
+        .map(|x| x.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| terrio::Error::InvalidArgument(format!("bounding box '{s}' is not xmin,ymin,xmax,ymax")))?;
+    match v.as_slice() {
+        [x0, y0, x1, y1] if x0 < x1 && y0 < y1 => Ok([*x0, *y0, *x1, *y1]),
+        _ => Err(terrio::Error::InvalidArgument(format!("bounding box '{s}' is not xmin,ymin,xmax,ymax with xmin < xmax and ymin < ymax"))),
+    }
+}

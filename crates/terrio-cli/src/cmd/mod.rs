@@ -12,6 +12,7 @@ pub mod grid;
 pub mod info;
 pub mod mosaic;
 pub mod multidim;
+pub mod overviews;
 
 pub mod pansharpen;
 pub mod points;
