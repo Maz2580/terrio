@@ -2,11 +2,13 @@
 
 pub mod calc;
 pub mod catalog;
+pub mod clean_collar;
 pub mod convert;
 pub mod create;
 pub mod crs;
 pub mod dem;
 pub mod edit;
+pub mod enhance;
 pub mod fill_nodata;
 pub mod filter;
 pub mod formats;
@@ -14,6 +16,7 @@ pub mod grid;
 pub mod info;
 pub mod mosaic;
 pub mod multidim;
+pub mod neighbors;
 pub mod overviews;
 
 pub mod pansharpen;
