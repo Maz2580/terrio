@@ -41,7 +41,7 @@ fn tile_origin(name: &str) -> Option<(i32, i32)> {
     if b.len() < 11 || b[7] != b'.' {
         return None;
     }
-    let digits = |s: &[u8]| -> Option<i32> { s.iter().all(u8::is_ascii_digit).then(|| std::str::from_utf8(s).ok()?.parse().ok())? };
+    let digits = |s: &[u8]| -> Option<i32> { std::str::from_utf8(s).ok().filter(|t| t.bytes().all(|c| c.is_ascii_digit()))?.parse().ok() };
     let lat = match b[0].to_ascii_lowercase() {
         b'n' => digits(&b[1..3])?,
         b's' => -digits(&b[1..3])?,
@@ -52,6 +52,10 @@ fn tile_origin(name: &str) -> Option<(i32, i32)> {
         b'w' => -digits(&b[4..7])?,
         _ => return None,
     };
+    // Latitude is at most 90 degrees and longitude at most 180.
+    if lat.abs() > 90 || lon.abs() > 180 {
+        return None;
+    }
     Some((lat, lon))
 }
 
@@ -94,7 +98,7 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
     raster.metadata.push(("AREA_OR_POINT".into(), "Point".into()));
     let mut ds = RasterDataset::with_driver(raster, RasterDriver::SRTMHGT, nodata.is_some());
     // Error, image and water body layers are not heights.
-    let unit = !matches!(ext.as_str(), "err" | "img" | "num" | "swb");
+    let unit = !matches!(ext.as_str(), "err" | "img" | "num" | "raw" | "swb");
     ds.band_metadata = vec![crate::BandMetadata { unit: unit.then(|| "m".into()), ..Default::default() }];
     Ok(ds)
 }
@@ -162,6 +166,10 @@ mod tests {
         assert_eq!(tile_origin("N37W12.hgt"), None);
         assert_eq!(tile_origin("X37W120.hgt"), None);
         assert_eq!(tile_origin("N3xW120.hgt"), None);
+        assert_eq!(tile_origin("N90W180.hgt"), Some((90, -180)));
+        assert_eq!(tile_origin("N91W120.hgt"), None);
+        assert_eq!(tile_origin("N37W181.hgt"), None);
+        assert_eq!(tile_origin("N99W999.hgt"), None);
     }
 
     /// A 3" tile with a height per row, void in its first cell.
@@ -204,6 +212,7 @@ mod tests {
         std::fs::write(&p, vec![255u8; 3601 * 3601]).unwrap();
         let ds = crate::open_raster(p.to_str().unwrap()).unwrap();
         assert_eq!((ds.raster.cols, ds.raster.data_type, ds.nodata()), (3601, DataType::U8, None));
+        assert_eq!(ds.band_metadata[0].unit, None);
     }
 
     #[test]
