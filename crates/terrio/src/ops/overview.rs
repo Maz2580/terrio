@@ -562,6 +562,9 @@ struct Sources<'a> {
     /// About how many bytes of values each full-resolution read of whole levels takes (64 MB,
     /// as [`LazyRaster::write`] reads them): fewer, larger reads, which decode on all threads.
     read_bytes: usize,
+    /// About how many values per band the strips of whole-window levels are computed from
+    /// ([`STRIP_VALUES`]).
+    strip_values: usize,
 }
 
 impl Sources<'_> {
@@ -675,8 +678,8 @@ fn source_rows(rows: &std::ops::Range<usize>, out_rows: usize, src_rows: usize) 
 }
 
 /// Resamples one band (`values`, rows `src_rows` of a level of `src_size`) to rows `rows` of an
-/// overview, as GDAL schedules it (GDAL's chunks for a whole level, which only [`compute`]'s
-/// whole-level reference takes: whole levels are computed by [`whole_levels`]).
+/// overview, as GDAL schedules it. GDAL's chunks for a whole level are used only by
+/// [`compute`]'s whole-level reference, which the tests compare [`whole_levels`] with.
 #[allow(clippy::too_many_arguments)]
 fn resample_band(
     values: &[f64],
@@ -722,14 +725,14 @@ fn from_values(data_type: DataType, values: Vec<f64>) -> RasterData {
     }
 }
 
-/// What a level is computed from: the previous level (computed, or stored at `level`) or full
-/// resolution.
 /// Whether a level of width `width` scheduled with `sched` is computed from the previous level
 /// computed (of width `prev_width`), rather than from full resolution.
 fn cascades(sched: Schedule, prev_width: usize, width: usize) -> bool {
     sched.from_prev && prev_width > width
 }
 
+/// What a level is computed from: the previous level (computed, or stored at `level`) or full
+/// resolution.
 fn source_of<'c>(
     sched: Schedule,
     prev: Option<&'c Computed>,
@@ -1041,18 +1044,24 @@ fn put_values(data: &mut RasterData, offset: usize, values: &[f64]) {
 }
 
 /// The steps of a job from a level of `src` rows: `(source rows, overview rows)`, GDAL's chunks of
-/// `GDALRegenerateOverviewsEx`, or strips of about [`STRIP_VALUES`] values per band (in whole
-/// blocks of `block` rows) for the unclamped windows, each with a row of margin (as
-/// [`source_rows`] gives them) so that every window lies in its strip.
-fn steps(sched: Schedule, out_rows: usize, src: (usize, usize), block: usize) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+/// `GDALRegenerateOverviewsEx`, or, for the unclamped windows, strips of overview rows whose
+/// source rows are about `values` values per band (in whole blocks of `block` rows). Each strip's
+/// source rows have a row of margin (as [`source_rows`] gives them), so every window lies in them.
+fn steps(
+    sched: Schedule,
+    out_rows: usize,
+    src: (usize, usize),
+    block: usize,
+    values: usize,
+) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
     match sched.chunk_rows {
         Some(chunk) => kernel::ex_chunks(src.1, out_rows, chunk),
         None => {
-            let rows = (STRIP_VALUES / src.0.max(1)).max(1).div_ceil(block) * block;
+            let rows = (values / src.0.max(1)).max(1).div_ceil(block) * block;
             if rows >= src.1 {
                 return vec![(0..src.1, 0..out_rows)];
             }
-            // Strips of overview rows whose source rows, with their margins, fit in `rows`.
+            // Strips of overview rows of about `rows` source rows.
             let strip = ((rows.saturating_sub(2) as u64 * out_rows as u64 / src.1 as u64) as usize).max(1);
             (0..out_rows)
                 .step_by(strip)
@@ -1107,7 +1116,7 @@ fn run_jobs(
         .map(|j| {
             let l = &levels[j.level];
             let sched = if j.mask { l.mask.unwrap_or(l.data) } else { l.data };
-            steps(sched, l.size.1, src_size, if prev.is_some() { 1 } else { block })
+            steps(sched, l.size.1, src_size, if prev.is_some() { 1 } else { block }, srcs.strip_values)
         })
         .collect();
     for (j, s) in jobs.iter().zip(&job_steps) {
@@ -1259,7 +1268,7 @@ fn build_new_levels(
     let base_block = base_block(src);
     let (data, _) = schedules((src.width(), src.height()), base_block, &sizes, &blocks, method, src.data_type(), multiband, src.has_mask());
     let levels: Vec<WholeLevel> = sizes.iter().zip(data).map(|(&size, data)| WholeLevel { size, method, data, mask: None }).collect();
-    let mut srcs = Sources { src, base: None, alpha, read_bytes: READ_BYTES };
+    let mut srcs = Sources { src, base: None, alpha, read_bytes: READ_BYTES, strip_values: STRIP_VALUES };
     let mut out = Vec::new();
     whole_levels(&mut srcs, &levels, |srcs, _, c| {
         let old = existing.and_then(|dirs| dirs.iter().find(|d| !d.is_mask() && d.size() == c.size));
@@ -1346,7 +1355,7 @@ fn add_internal<F: Read + Write + Seek>(
     }
     let plan: Vec<WholeLevel> =
         sizes.iter().zip(data).zip(masks).map(|((&size, data), mask)| WholeLevel { size, method, data, mask }).collect();
-    let mut srcs = Sources { src, base: None, alpha, read_bytes: READ_BYTES };
+    let mut srcs = Sources { src, base: None, alpha, read_bytes: READ_BYTES, strip_values: STRIP_VALUES };
     let mut a = Appender::new(file, tiff.big)?;
     // Every overview of the result: (size, directory, mask directory).
     let mut levels: Vec<((usize, usize), Directory, Option<Directory>)> = Vec::new();
@@ -1581,7 +1590,7 @@ pub(crate) fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster
     let whole = region == [0, 0, w, h];
     let mut a = Appender::new(file, tiff.big)?;
     let mut dirs = tiff.dirs.clone();
-    let mut srcs = Sources { src, base: None, alpha, read_bytes: READ_BYTES };
+    let mut srcs = Sources { src, base: None, alpha, read_bytes: READ_BYTES, strip_values: STRIP_VALUES };
     // Each target's schedules, for its own method.
     let plan: Vec<WholeLevel> = targets
         .iter()
@@ -1729,14 +1738,14 @@ mod tests {
         let config = wbraster::RasterConfig { cols: 2, rows: 2, bands: 1, data_type: DataType::U8, ..Default::default() };
         let raster = wbraster::Raster::from_data(config, vec![1., 2., 3., 4.]).unwrap();
         let mut src = LazyRaster::from(crate::RasterDataset::new(raster, false));
-        let mut sources = Sources { src: &mut src, base: None, alpha: None, read_bytes: READ_BYTES };
+        let mut sources = Sources { src: &mut src, base: None, alpha: None, read_bytes: READ_BYTES, strip_values: STRIP_VALUES };
         let (a, _) = sources.rows(None, (2, 2), 0..2, None, false).unwrap();
         let (b, _) = sources.rows(None, (2, 2), 0..2, None, false).unwrap();
         assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 
     #[test]
-    fn whole_levels_convert_every_type_and_method_as_whole_reads() {
+    fn whole_levels_match_whole_image_compute_for_every_type_and_method() {
         // Every method, in types whose work types and conversions differ.
         let (w, h) = (300, 211);
         let sizes = [(150, 106), (75, 53), (19, 14)];
@@ -1767,7 +1776,7 @@ mod tests {
                 for multiband in [false, true] {
                     let (data, masks) = schedules((w, h), (64, 64), &sizes, &blocks, method, data_type, multiband, false);
                     let mut whole = LazyRaster::from_tiff_bytes(tiff.clone()).unwrap().unwrap();
-                    let mut srcs = Sources { src: &mut whole, base: None, alpha: None, read_bytes: READ_BYTES };
+                    let mut srcs = Sources { src: &mut whole, base: None, alpha: None, read_bytes: READ_BYTES, strip_values: STRIP_VALUES };
                     let mut expected: Vec<Computed> = Vec::new();
                     for (k, &size) in sizes.iter().enumerate() {
                         let c = compute(&mut srcs, size, 0..size.1, expected.last(), method, data[k], masks[k], 0).unwrap();
@@ -1776,8 +1785,8 @@ mod tests {
                     let mut src = LazyRaster::from_tiff_bytes(tiff.clone()).unwrap().unwrap();
                     let plan: Vec<WholeLevel> =
                         sizes.iter().enumerate().map(|(k, &size)| WholeLevel { size, method, data: data[k], mask: masks[k] }).collect();
-                    // Reads of 64 rows.
-                    let mut srcs = Sources { src: &mut src, base: None, alpha: None, read_bytes: 1 };
+                    // Reads of 64 rows, and strips of 64 source rows (with their margins).
+                    let mut srcs = Sources { src: &mut src, base: None, alpha: None, read_bytes: 1, strip_values: 20 * w };
                     whole_levels(&mut srcs, &plan, |_, k, c| {
                         assert_eq!(c.data.data_type(), data_type);
                         assert_eq!(c.data.to_f64_vec(), expected[k].data.to_f64_vec(), "{data_type:?} {method:?} {multiband} level {k}");
@@ -1853,7 +1862,7 @@ mod tests {
                     let (data, masks) = schedules((w, h), (256, 256), &sizes, &blocks, method, DataType::F64, multiband, has_mask);
                     // The levels as computed from the whole image.
                     let mut whole = LazyRaster::from_tiff_bytes(tiff.clone()).unwrap().unwrap();
-                    let mut srcs = Sources { src: &mut whole, base: None, alpha, read_bytes: READ_BYTES };
+                    let mut srcs = Sources { src: &mut whole, base: None, alpha, read_bytes: READ_BYTES, strip_values: STRIP_VALUES };
                     let mut expected: Vec<Computed> = Vec::new();
                     for (k, &size) in sizes.iter().enumerate() {
                         let c = compute(&mut srcs, size, 0..size.1, expected.last(), method, data[k], masks[k], 0).unwrap();
@@ -1868,13 +1877,17 @@ mod tests {
                     let plan: Vec<WholeLevel> =
                         sizes.iter().enumerate().map(|(k, &size)| WholeLevel { size, method, data: data[k], mask: masks[k] }).collect();
                     let mut seen = 0;
-                    whole_levels(&mut Sources { src: &mut src, base: None, alpha, read_bytes: 1 << 20 }, &plan, |_, k, c| {
-                        let e = &expected[k];
-                        assert_eq!(c.data.to_f64_vec(), e.data.to_f64_vec(), "{method:?} {multiband} {bands} {has_mask} level {k}");
-                        assert_eq!(c.mask, e.mask, "{method:?} {multiband} {bands} {has_mask} level {k} mask");
-                        seen += 1;
-                        Ok(())
-                    })
+                    whole_levels(
+                        &mut Sources { src: &mut src, base: None, alpha, read_bytes: 1 << 20, strip_values: STRIP_VALUES },
+                        &plan,
+                        |_, k, c| {
+                            let e = &expected[k];
+                            assert_eq!(c.data.to_f64_vec(), e.data.to_f64_vec(), "{method:?} {multiband} {bands} {has_mask} level {k}");
+                            assert_eq!(c.mask, e.mask, "{method:?} {multiband} {bands} {has_mask} level {k} mask");
+                            seen += 1;
+                            Ok(())
+                        },
+                    )
                     .unwrap();
                     assert_eq!(seen, sizes.len());
                     // Every full-resolution row is read once, forward, in windows of whole blocks.
