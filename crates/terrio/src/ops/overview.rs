@@ -367,6 +367,16 @@ pub fn dataset_bounds(path: &str, crs: &crate::crs::SpatialRef) -> Result<[f64; 
     Ok([b.0, b.1, b.2, b.3])
 }
 
+/// The extents of the `--like` datasets `likes`, in the CRS of the raster `path` (none when
+/// `likes` is empty).
+pub fn like_bounds(path: &str, likes: &[String]) -> Result<Vec<[f64; 4]>> {
+    if likes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let crs = crate::open_raster_lazy(path)?.crs();
+    likes.iter().map(|src| dataset_bounds(src, &crs)).collect()
+}
+
 /// The `.ovr` sidecar of a file.
 fn ovr_path(file: &std::path::Path) -> std::path::PathBuf {
     let mut p = file.as_os_str().to_owned();
@@ -897,8 +907,7 @@ fn shared_tags(main: &Directory, dir: &mut Directory) {
     }
 }
 
-/// Computes whole new levels of `sizes` (in cascade, largest first) as images like `like`
-/// (without mask images: for an `.ovr` sidecar).
+/// Warns that overview arithmetic on 64-bit integers may lose precision above 2^53.
 fn warn_integer_precision(data_type: DataType) {
     if matches!(data_type, DataType::I64 | DataType::U64) {
         crate::warnings::warn(
@@ -907,6 +916,8 @@ fn warn_integer_precision(data_type: DataType) {
     }
 }
 
+/// Computes whole new levels of `sizes` (in cascade, largest first) as images like `like`
+/// (without mask images: for an `.ovr` sidecar).
 fn build_new_levels(
     src: &mut LazyRaster,
     like: &Directory,
@@ -1199,6 +1210,9 @@ pub(crate) fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster
     if let Some(f) = o.levels.iter().find(|f| **f < 2) {
         return Err(Error::InvalidArgument(format!("an overview level is a decimation factor of 2 or more, not {f}")));
     }
+    if let Some(b) = o.bbox.iter().find(|b| !(b.iter().all(|v| v.is_finite()) && b[0] < b[2] && b[1] < b[3])) {
+        return Err(Error::InvalidArgument(format!("bounding box {b:?} is not [xmin, ymin, xmax, ymax] with xmin < xmax and ymin < ymax")));
+    }
     let mut targets: Vec<((usize, usize), usize, Option<usize>)> = im
         .overviews
         .iter()
@@ -1358,6 +1372,7 @@ fn invalid(value: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn gdal_ratios_and_fallbacks() {
         let levels = [(512, 512), (256, 256), (128, 128)];
@@ -1375,6 +1390,7 @@ mod tests {
             assert!(OverviewSelection::parse(invalid).is_err());
         }
     }
+
     #[test]
     fn whole_level_reads_share_the_pixel_buffer() {
         let config = wbraster::RasterConfig { cols: 2, rows: 2, bands: 1, data_type: DataType::U8, ..Default::default() };

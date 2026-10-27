@@ -5,7 +5,6 @@ mod arrow;
 #[cfg(not(target_os = "emscripten"))]
 mod cli;
 mod focal;
-
 mod grid;
 mod manage;
 mod multidim;

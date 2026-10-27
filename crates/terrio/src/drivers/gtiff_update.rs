@@ -638,6 +638,7 @@ mod tests {
         assert!(matches!(writable_local_file("https://example.com/a.tif"), Err(Error::Unsupported(_))));
         assert!(matches!(writable_local_file("/vsizip/a.zip/a.tif"), Err(Error::Unsupported(_))));
     }
+
     #[test]
     fn aggregate_metadata_budget_bounds_overlapping_tag_payloads() {
         let count = 65u16;

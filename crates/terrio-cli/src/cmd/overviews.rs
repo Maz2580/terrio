@@ -4,7 +4,7 @@
 use super::rasterout::parse_bbox;
 use terrio::ops::Resampling;
 use terrio::ops::overview::{
-    DeleteOptions, OverviewOptions, RefreshOptions, add_overviews, dataset_bounds, delete_overviews, refresh_overviews,
+    DeleteOptions, OverviewOptions, RefreshOptions, add_overviews, delete_overviews, like_bounds, refresh_overviews,
 };
 
 /// Build overviews of a GeoTIFF in place, or in its `.ovr` sidecar (like gdaladdo and `gdal raster
@@ -66,12 +66,7 @@ pub fn run(a: Args) -> terrio::Result<()> {
     let resampling = a.resampling.as_deref().map(Resampling::parse).transpose()?;
     if a.refresh {
         let mut bbox: Vec<[f64; 4]> = a.bbox.iter().map(|b| parse_bbox(b)).collect::<terrio::Result<_>>()?;
-        if !a.like.is_empty() {
-            let crs = super::quiet(|| terrio::open_raster_lazy(&a.input))?.crs();
-            for path in &a.like {
-                bbox.push(super::quiet(|| dataset_bounds(path, &crs))?);
-            }
-        }
+        bbox.extend(super::quiet(|| like_bounds(&a.input, &a.like))?);
         let o = RefreshOptions { resampling, levels, bbox, external: a.external, ignore_cog_layout_break: a.ignore_cog_layout_break };
         let sizes = super::quiet(|| refresh_overviews(&a.input, &o))?;
         println!("refreshed {}", sizes_text(&sizes));

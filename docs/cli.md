@@ -1709,26 +1709,11 @@ Writing a PixelIsPoint GeoTIFF requires a CRS. A write with an unknown CRS is
 rejected before creating the file, avoiding a half-pixel origin shift without
 a corresponding raster-type GeoKey.
 
-Raster in-place edits copy the whole TIFF, including for metadata-only changes, and
-need free disk space for that copy. Symlink targets and mode bits are preserved;
-replacement detaches hard links and does not preserve ownership, ACLs or extended
-attributes. The containing directory must be writable. The TIFF is committed before
-its histogram or external-overview sidecar: a later sidecar error can leave the TIFF
-updated with an unchanged sidecar.
-
-Overview generation reuses shared full-level pixel buffers when GDAL's schedule needs
-a whole level; windowed schedules retain window reads. Overview and raster-update
-arithmetic uses Float64 and warns for Int64/UInt64: values above 2^53 may lose precision,
-including nearest/mode overviews. Raster update holds the warped window and the full
-width of the destination rows it rewrites in memory.
-
-
 Raster comparison reads TIFFTAG items, embedded RPC tags and PAM sidecar metadata
 from local filesystem inputs. HTTP and archive comparisons use the reader's
 metadata and do not add those local-file extras. Comparing a local file to its
 remote/archive copy can therefore report metadata differences; use the applicable
 metadata/RPC skip options for a pixel-focused comparison across those locations.
-
 
 ### Raster management
 
@@ -1769,3 +1754,16 @@ also matching those probes. Average updates between identical affine pixel grids
 their origin offsets are integer to within 1e-7 pixels; fractional offsets retain
 area-based resampling.
 Min/max overview methods are Terrio extensions; GDAL 3.13.3 gdaladdo refuses them.
+
+Raster in-place edits copy the whole TIFF, including for metadata-only changes, and
+need free disk space for that copy. Symlink targets and mode bits are preserved;
+replacement detaches hard links and does not preserve ownership, ACLs or extended
+attributes. The containing directory must be writable. The TIFF is committed before
+its histogram or external-overview sidecar: a later sidecar error can leave the TIFF
+updated with an unchanged sidecar.
+
+Overview generation reuses shared full-level pixel buffers when GDAL's schedule needs
+a whole level; windowed schedules retain window reads. Overview and raster-update
+arithmetic uses Float64 and warns for Int64/UInt64: values above 2^53 may lose precision,
+including nearest/mode overviews. Raster update holds the warped window and the full
+width of the destination rows it rewrites in memory.

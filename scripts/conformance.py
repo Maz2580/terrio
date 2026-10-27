@@ -493,7 +493,7 @@ def suite_raster_manage(ctx):
         return suite
     for result in results:
         suite.cases.append(Case("raster management", result["name"], result["status"], result["detail"]))
-    if not results or code and not any(case.status == DIFFERS for case in suite.cases):
+    if not results or (code and not any(case.status == DIFFERS for case in suite.cases)):
         suite.error = tail(err or out) or f"comparison exited {code} without complete results"
     return suite
 

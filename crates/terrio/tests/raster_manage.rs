@@ -4,6 +4,7 @@
 use terrio::ops::Resampling;
 use terrio::ops::overview::{
     DeleteOptions, OverviewOptions, RefreshOptions, add_overviews, add_overviews_to_bytes, delete_overviews, refresh_overviews,
+    refresh_overviews_in_bytes,
 };
 use terrio::{DataType, RasterDataset, RasterWriteOptions, Window, WindowOptions};
 
@@ -313,4 +314,18 @@ fn cog_layout_is_kept_when_no_overview_changes() {
     // Under 256 pixels there are no automatic levels to add.
     assert_eq!(add_overviews(&cog, &OverviewOptions::default()).unwrap(), vec![(32, 32), (16, 16)]);
     assert_eq!(std::fs::read(&cog).unwrap(), bytes);
+}
+
+#[test]
+fn refresh_rejects_a_malformed_bounding_box_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "bad_bbox.tif", &sample(64, 64), &tiled());
+    add_overviews(&path, &OverviewOptions { levels: vec![2], ..Default::default() }).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    for bbox in [[10.0, 0.0, 0.0, 10.0], [0.0, 10.0, 10.0, 0.0], [0.0, 0.0, f64::NAN, 1.0]] {
+        let options = RefreshOptions { bbox: vec![bbox], ..Default::default() };
+        assert!(refresh_overviews(&path, &options).is_err(), "{bbox:?}");
+        assert!(refresh_overviews_in_bytes(&bytes, &options).is_err(), "{bbox:?}");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }

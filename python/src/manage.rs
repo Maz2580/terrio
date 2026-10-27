@@ -131,10 +131,7 @@ fn refresh_overviews(
     };
     with_warnings(py, || {
         if let Some(like) = like {
-            let crs = terrio::open_raster_lazy(path)?.crs();
-            for src in like {
-                o.bbox.push(overview::dataset_bounds(&src, &crs)?);
-            }
+            o.bbox.extend(overview::like_bounds(path, &like)?);
         }
         overview::refresh_overviews(path, &o)
     })

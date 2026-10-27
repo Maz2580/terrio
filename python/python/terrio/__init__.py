@@ -132,9 +132,9 @@ from terrio.errors import (
 __all__ = [
     "add_overviews",
     "create_raster",
+    "delete_overviews",
     "edit_raster",
     "move_raster",
-    "delete_overviews",
     "refresh_overviews",
     "update_raster",
     "ArrowTable",

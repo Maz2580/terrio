@@ -109,6 +109,9 @@ fn plan(like: Option<&LazyRaster>, o: &CreateOptions) -> Result<(RasterDataset, 
         header.raster.metadata.extend(src.raster.metadata.iter().filter(|(k, _)| k != "AREA_OR_POINT").cloned());
         header.band_metadata = src.band_metadata.iter().take(bands).cloned().collect();
     }
+    if o.metadata.iter().any(|(k, _)| k == NOT_GEOREFERENCED) {
+        return Err(Error::InvalidArgument(format!("'{NOT_GEOREFERENCED}' is a reserved metadata key")));
+    }
     for (k, v) in &o.metadata {
         header.raster.metadata.retain(|(n, _)| n != k);
         header.raster.metadata.push((k.clone(), v.clone()));
@@ -215,5 +218,11 @@ mod tests {
         assert_eq!(&ds.raster.data.to_f64_vec()[12..], &[255.0; 12]);
         assert!(create_raster(None, &CreateOptions { burn: vec![1.0, 2.0, 3.0], ..o }).is_err());
         assert!(create_raster(None, &CreateOptions::default()).is_err());
+    }
+
+    #[test]
+    fn reserved_not_georeferenced_key_is_rejected() {
+        let o = CreateOptions { size: Some((2, 2)), metadata: vec![(NOT_GEOREFERENCED.into(), "x".into())], ..Default::default() };
+        assert!(create_raster(None, &o).is_err());
     }
 }
