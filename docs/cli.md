@@ -1885,13 +1885,18 @@ requested rebuilt levels. Updates retain destination pixels outside valid source
 coverage and refresh affected overviews unless `--no-update-overviews` is set.
 Georeferencing moves change the affine transform and CRS without resampling;
 `--t-srs` conflicts with other edits, and requires `--error-threshold` to write.
+A raster without a geotransform of its own (unreferenced, or georeferenced by
+ground control points) cannot be moved. With `--like`, a template without a
+geotransform gives its GCPs, or no georeferencing, instead of a unit-pixel grid.
 
 In-place operations require writable little-endian GeoTIFFs. Updating a COG
 requires `--ignore-cog-layout-break` and can invalidate its optimized layout.
 Edits use a temporary file and rename; a failure before replacement preserves
-the original. Updating external overviews occurs after the base TIFF commits, so
-an error there can leave stale overviews. Update working buffers span full-width
-rows intersecting the update window; memory can be large for wide rasters.
+the original. A tag of a field type the TIFF specification does not define is
+refused rather than dropped from the rewritten file. Updating external overviews
+occurs after the base TIFF commits, so an error there can leave stale overviews.
+Update working buffers span full-width rows intersecting the update window; memory
+can be large for wide rasters.
 
 Raster update requires equal source/destination band counts and treats alpha as
 an ordinary band; automatic RGB-to-RGBA alpha synthesis is not supported. Existing
@@ -1909,8 +1914,9 @@ attributes. The containing directory must be writable. The TIFF is committed bef
 its histogram or external-overview sidecar: a later sidecar error can leave the TIFF
 updated with an unchanged sidecar.
 
-Overview generation reuses shared full-level pixel buffers when GDAL's schedule needs
-a whole level; windowed schedules retain window reads. Overview and raster-update
+Building overviews reads the whole full-resolution image, and its mask, into memory
+once, shared by every level computed from it: memory grows with the raster. Partial
+refreshes (`--refresh --bbox`) keep window reads. Overview and raster-update
 arithmetic uses Float64 and warns for Int64/UInt64: values above 2^53 may lose precision,
 including nearest/mode overviews. Raster update holds the warped window and the full
 width of the destination rows it rewrites in memory.

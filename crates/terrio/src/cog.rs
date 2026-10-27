@@ -613,6 +613,15 @@ impl LazyRaster {
         }
     }
 
+    /// Whether the file has a geotransform of its own: false for an unreferenced or GCP-only
+    /// GeoTIFF, whose [`geo_transform`](Self::geo_transform) is the unit-pixel fallback.
+    pub fn has_geo_transform(&self) -> bool {
+        match &self.inner {
+            Inner::Tiff(t) => t.tags.corner_geo_transform().is_some(),
+            Inner::Memory(ds) | Inner::Source(ds, _) => ds.gcps.is_empty() || ds.affine.is_some(),
+        }
+    }
+
     /// The CRS.
     pub fn crs(&self) -> SpatialRef {
         match &self.inner {

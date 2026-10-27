@@ -109,6 +109,8 @@ fn refresh_options(o: &UpdateOptions, extent: [f64; 4], external: bool) -> Refre
         resampling: overview_method.then_some(o.resampling),
         bbox: vec![extent],
         external,
+        // Safe only because `update_tiff` has already refused (or been allowed) the COG layout
+        // break before this refresh: a new caller must run that check itself.
         ignore_cog_layout_break: true,
         ..Default::default()
     }

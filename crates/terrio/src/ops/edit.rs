@@ -579,6 +579,10 @@ fn move_report(src: &LazyRaster, o: &MoveOptions) -> Result<MoveReport> {
     if s_srs.is_unknown() {
         return Err(Error::Crs("the raster has no CRS: give the source CRS".into()));
     }
+    if !src.has_geo_transform() {
+        let what = if src.header().gcps.is_empty() { "has no geotransform" } else { "is georeferenced by ground control points" };
+        return Err(Error::Unsupported(format!("the raster {what}: it cannot be moved without resampling")));
+    }
     let gt = src.geo_transform();
     let (w, h) = (src.width() as f64, src.height() as f64);
     let pixels = [(0.0, 0.0), (0.0, h), (w, 0.0), (w, h), (w / 2.0, h / 2.0)];
@@ -609,6 +613,34 @@ fn move_report(src: &LazyRaster, o: &MoveOptions) -> Result<MoveReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiff(opts: &gw::TiffOptions) -> Vec<u8> {
+        let cfg = wbraster::RasterConfig { cols: 4, rows: 3, bands: 1, data_type: DataType::U8, ..Default::default() };
+        let r = wbraster::Raster::from_data(cfg, vec![1.0; 12]).unwrap();
+        gw::encode(&r, opts).unwrap()
+    }
+
+    #[test]
+    fn move_refuses_rasters_without_their_own_geotransform() {
+        let gcps = [(0.0, 0.0), (4.0, 0.0), (0.0, 3.0)]
+            .map(|(pixel, line)| Gcp { pixel, line, x: pixel, y: -line, ..Default::default() })
+            .to_vec();
+        let o = MoveOptions {
+            t_srs: SpatialRef::from_epsg(3857).unwrap(),
+            s_srs: Some(SpatialRef::from_epsg(3857).unwrap()),
+            error_threshold: Some(1.0),
+            ignore_cog_layout_break: false,
+        };
+        let cases = [
+            (gw::TiffOptions { gcps, ..Default::default() }, "ground control points"),
+            (gw::TiffOptions { georeferenced: false, ..Default::default() }, "no geotransform"),
+        ];
+        for (opts, reason) in cases {
+            let err = move_raster_bytes(&tiff(&opts), &o).unwrap_err();
+            assert!(matches!(&err, Error::Unsupported(m) if m.contains(reason)), "{err}");
+        }
+        assert!(move_raster_bytes(&tiff(&gw::TiffOptions::default()), &o).unwrap().1.updated);
+    }
 
     #[test]
     fn new_metadata_values_use_gdal_cpl_and_xml_escaping() {

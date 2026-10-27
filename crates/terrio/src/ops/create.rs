@@ -78,8 +78,8 @@ fn plan(like: Option<&LazyRaster>, o: &CreateOptions) -> Result<(RasterDataset, 
             }
             Some([b[0], (b[2] - b[0]) / w as f64, 0.0, b[3], 0.0, -(b[3] - b[1]) / h as f64])
         }
-        // The template's geotransform, whatever the size (as GDAL keeps it).
-        (None, Some(l)) => Some(l.geo_transform()),
+        // The template's geotransform, whatever the size (as GDAL keeps it), when it has one.
+        (None, Some(l)) => l.has_geo_transform().then(|| l.geo_transform()),
         (None, None) => None,
     };
     let fill = match o.burn.len() {
@@ -99,8 +99,9 @@ fn plan(like: Option<&LazyRaster>, o: &CreateOptions) -> Result<(RasterDataset, 
         header.set_geo_transform(gt);
     }
     if gt.is_none() {
-        // Not georeferenced: written without a geotransform.
+        // Not georeferenced: written without a geotransform, with a template's GCPs if it has any.
         header.raster.metadata.push((NOT_GEOREFERENCED.into(), "YES".into()));
+        header.gcps = like.map(|l| l.header().gcps).unwrap_or_default();
     }
     if o.copy_metadata
         && let Some(l) = like
@@ -218,6 +219,30 @@ mod tests {
         assert_eq!(&ds.raster.data.to_f64_vec()[12..], &[255.0; 12]);
         assert!(create_raster(None, &CreateOptions { burn: vec![1.0, 2.0, 3.0], ..o }).is_err());
         assert!(create_raster(None, &CreateOptions::default()).is_err());
+    }
+
+    #[test]
+    fn templates_without_a_geotransform_keep_their_gcps_or_absence() {
+        use crate::drivers::gtiff_write as gw;
+        let cfg = wbraster::RasterConfig { cols: 4, rows: 3, bands: 1, data_type: DataType::U8, ..Default::default() };
+        let r = wbraster::Raster::from_data(cfg, vec![1.0; 12]).unwrap();
+        let gcps: Vec<crate::Gcp> = [(0.0, 0.0), (4.0, 0.0), (0.0, 3.0)]
+            .map(|(pixel, line)| crate::Gcp { pixel, line, x: 10.0 + pixel, y: 20.0 - line, ..Default::default() })
+            .to_vec();
+        let dir = tempfile::tempdir().unwrap();
+        for (name, opts) in [
+            ("gcps", gw::TiffOptions { gcps: gcps.clone(), ..Default::default() }),
+            ("none", gw::TiffOptions { georeferenced: false, ..Default::default() }),
+        ] {
+            let like = LazyRaster::from_tiff_bytes(gw::encode(&r, &opts).unwrap()).unwrap().unwrap();
+            assert!(!like.has_geo_transform());
+            let out = dir.path().join(format!("{name}.tif"));
+            create_raster_file_from_template(out.to_str().unwrap(), Some(&like), &CreateOptions::default(), &Default::default()).unwrap();
+            let created = crate::open_raster_lazy(out.to_str().unwrap()).unwrap();
+            assert!(!created.has_geo_transform(), "{name}");
+            assert_eq!(created.header().gcps, like.header().gcps, "{name}");
+            assert_eq!(created.header().gcps.len(), opts.gcps.len(), "{name}");
+        }
     }
 
     #[test]

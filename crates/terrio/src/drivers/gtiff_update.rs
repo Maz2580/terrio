@@ -155,7 +155,8 @@ fn read_at<R: Read + Seek>(r: &mut R, offset: u64, buf: &mut [u8], len: u64) -> 
 }
 
 /// Reads the structure of a little-endian TIFF: its header and the chain of directories with
-/// every tag's values. Tags of unknown field types are left out (as libtiff ignores them).
+/// every tag's values. A tag of an unknown field type is refused: its size, and so its values,
+/// are unknown, and leaving it out would drop it from the rewritten file.
 pub(crate) fn parse<R: Read + Seek>(r: &mut R) -> Result<Tiff> {
     let len = r.seek(SeekFrom::End(0))?;
     let mut head = [0u8; 16];
@@ -207,9 +208,9 @@ pub(crate) fn parse<R: Read + Seek>(r: &mut R) -> Result<Tiff> {
             } else {
                 (u32::from_le_bytes(e[4..8].try_into().unwrap()) as u64, &e[8..12])
             };
+            // Its size is unknown, so it could not be copied: refused rather than dropped.
             let Some(size) = type_size(typ) else {
-                crate::warnings::warn(format!("TIFF tag {tag} of unknown field type {typ} is left out"));
-                continue;
+                return Err(Error::Unsupported(format!("TIFF tag {tag} has an unknown field type {typ}: the file cannot be rewritten")));
             };
             let bytes_len =
                 n.checked_mul(size).filter(|b| *b <= len).ok_or_else(|| Error::InvalidData(format!("TIFF: tag {tag} is too large")))?;
@@ -597,6 +598,16 @@ mod tests {
             let b = crate::LazyRaster::from_tiff_bytes(out).unwrap().unwrap().read().unwrap();
             assert_eq!(a.raster.data.to_f64_vec(), b.raster.data.to_f64_vec());
         }
+    }
+
+    #[test]
+    fn unknown_field_types_are_refused_not_dropped() {
+        let mut bytes = sample(false);
+        let first = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        // The first entry's field type, made one TIFF does not define.
+        bytes[first + 2 + 2..first + 2 + 4].copy_from_slice(&99u16.to_le_bytes());
+        let err = parse(&mut std::io::Cursor::new(bytes)).unwrap_err();
+        assert!(matches!(&err, Error::Unsupported(m) if m.contains("unknown field type 99")), "{err}");
     }
 
     #[test]
