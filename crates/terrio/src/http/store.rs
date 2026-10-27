@@ -28,6 +28,9 @@ pub(crate) struct ObjectStat {
     pub modified: Option<i64>,
     /// The entity tag, without quotes.
     pub etag: Option<String>,
+    /// The media type (`Content-Type`), lowercase, without parameters; `None` when the server
+    /// sends none.
+    pub content_type: Option<String>,
 }
 
 /// How `dir` is listed.
@@ -167,7 +170,7 @@ pub(crate) fn list_html(url: &str) -> Result<Option<Vec<ObjectEntry>>> {
         return Ok(None);
     }
     let content_type = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
-    if !content_type.is_empty() && !(content_type.starts_with("text/html") || content_type.starts_with("application/xhtml+xml")) {
+    if !content_type.is_empty() && !crate::vsi::listing::is_html_type(&content_type) {
         return Ok(None);
     }
     const MAX_HTML_BYTES: u64 = crate::vsi::RemoteLister::HTML_BODY_LIMIT as u64;
@@ -202,6 +205,8 @@ pub(crate) fn stat(remote: &Remote) -> Result<Option<ObjectStat>> {
     let header = |n: &str| response.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
     let modified = header("last-modified").and_then(|d| parse_http_date(&d));
     let etag = header("etag").map(|e| e.trim_matches('"').to_string());
+    let content_type =
+        header("content-type").map(|t| t.split(';').next().unwrap_or_default().trim().to_ascii_lowercase()).filter(|t| !t.is_empty());
     let total = header("content-range").and_then(|v| super::content_range_total(&v));
     let length = header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
     super::REQUESTS.fetch_add(1, Ordering::Relaxed);
@@ -212,7 +217,8 @@ pub(crate) fn stat(remote: &Remote) -> Result<Option<ObjectStat>> {
     // headers are enough; do not consume a potentially huge response body.
     if matches!(status, 206 | 416) {
         let mut body = Vec::new();
-        response.into_body().into_reader().take(1).read_to_end(&mut body)?;
+        // Read to its end (one byte past the range, at most), so that the connection is reused.
+        response.into_body().into_reader().take(2).read_to_end(&mut body)?;
         super::BYTES.fetch_add(body.len() as u64, Ordering::Relaxed);
     }
     let size = match status {
@@ -223,24 +229,42 @@ pub(crate) fn stat(remote: &Remote) -> Result<Option<ObjectStat>> {
         416 => Some(total.unwrap_or(0)),
         _ => total,
     };
-    Ok(Some(ObjectStat { size, modified, etag }))
+    Ok(Some(ObjectStat { size, modified, etag, content_type }))
 }
 
 /// What an upload sends.
 pub(crate) enum Payload {
     /// Nothing (a `DELETE`, a server-side copy).
     Empty,
-    /// The bytes of a local file.
-    File(PathBuf),
+    /// The bytes of a local file, with their SHA-256 (hex) when it is already known.
+    File(PathBuf, Option<String>),
     /// Bytes in memory.
     Bytes(Vec<u8>),
+}
+
+/// The largest file a signed upload reads into memory, to hash and send it from one read, when
+/// its hash is not known; larger files are read once to hash them and again to send them.
+const SIGNED_BUFFER_LIMIT: u64 = 8 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// The bytes of payload files read on this thread, other than to send them.
+    static FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Reads all of `reader`, counting the bytes in tests.
+fn read_counted(mut reader: impl Read, out: &mut Vec<u8>) -> std::io::Result<usize> {
+    let n = reader.read_to_end(out)?;
+    #[cfg(test)]
+    FILE_READS.with(|c| c.set(c.get() + n as u64));
+    Ok(n)
 }
 
 impl Payload {
     fn len(&self) -> Result<u64> {
         Ok(match self {
             Payload::Empty => 0,
-            Payload::File(p) => std::fs::metadata(p)?.len(),
+            Payload::File(p, _) => std::fs::metadata(p)?.len(),
             Payload::Bytes(b) => b.len() as u64,
         })
     }
@@ -251,19 +275,69 @@ impl Payload {
         match self {
             Payload::Empty => {}
             Payload::Bytes(b) => h.update(b),
-            Payload::File(p) => {
+            Payload::File(_, Some(hash)) => return Ok(hash.clone()),
+            Payload::File(p, None) => {
                 let mut f = std::fs::File::open(p)?;
-                let mut buf = vec![0u8; 1 << 16];
+                let mut buf = Vec::with_capacity(1 << 16);
                 loop {
-                    let n = f.read(&mut buf)?;
-                    if n == 0 {
+                    buf.clear();
+                    if read_counted((&mut f).take(1 << 16), &mut buf)? == 0 {
                         break;
                     }
-                    h.update(&buf[..n]);
+                    h.update(&buf);
                 }
             }
         }
         Ok(s3::hex(&h.finalize()))
+    }
+
+    /// A small file of a signed upload whose hash is not known, read into memory, so that it is
+    /// hashed and sent from one read; other payloads as they are.
+    fn for_signing(self) -> Result<Self> {
+        let Payload::File(path, None) = &self else { return Ok(self) };
+        if std::fs::metadata(path)?.len() > SIGNED_BUFFER_LIMIT {
+            return Ok(self);
+        }
+        let mut bytes = Vec::new();
+        read_counted(std::fs::File::open(path)?.take(SIGNED_BUFFER_LIMIT + 1), &mut bytes)?;
+        // Grown since: hashed and sent from the file.
+        if bytes.len() as u64 > SIGNED_BUFFER_LIMIT {
+            return Ok(self);
+        }
+        Ok(Payload::Bytes(bytes))
+    }
+}
+
+/// A writer that computes the SHA-256 of the bytes written through it, so that a file written for
+/// a signed upload is not read again to hash it.
+pub(crate) struct HashingWriter<W> {
+    inner: W,
+    hasher: sha2::Sha256,
+}
+
+impl<W: std::io::Write> HashingWriter<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        use sha2::Digest;
+        Self { inner, hasher: sha2::Sha256::new() }
+    }
+
+    /// The SHA-256 of what was written, in hex.
+    pub(crate) fn finish(self) -> String {
+        use sha2::Digest;
+        s3::hex(&self.hasher.finalize())
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -273,31 +347,58 @@ struct Reply {
     body: Vec<u8>,
 }
 
+/// The final statuses a write request returns rather than failing with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Accept {
+    /// 2xx.
+    Success,
+    /// 2xx, and 404 (a missing object).
+    Missing,
+    /// Any status.
+    Any,
+}
+
 /// Sends a write request (`PUT`, `DELETE`, `POST`) for an object: S3 objects signed when
 /// credentials are set (retried in the bucket's region when another was asked), Azure blobs with
 /// the SAS token of their URL. Transient errors are retried; only same-origin write
 /// redirects are followed. Bucket-region discovery uses the store’s own endpoint. Statuses
-/// other than 2xx (and 404 when `missing_ok`) are errors.
+/// other than those `accept`ed are errors.
 fn write_request(
     method: &str,
     remote: &Remote,
     query: &str,
     headers: &[(String, String)],
-    payload: &Payload,
-    missing_ok: bool,
+    payload: Payload,
+    accept: Accept,
 ) -> Result<Reply> {
-    let options = HttpOptions::from_env();
-    let agent = agent(&options);
-    let (creds, mut region) = match remote {
+    let auth = match remote {
         Remote::S3(_) => (Credentials::from_env(), s3::region_from_env()),
         Remote::Url(_) => (None, None),
     };
+    write_request_with(method, remote, query, headers, payload, accept, auth)
+}
+
+/// [`write_request`] with the S3 credentials and region given.
+fn write_request_with(
+    method: &str,
+    remote: &Remote,
+    query: &str,
+    headers: &[(String, String)],
+    payload: Payload,
+    accept: Accept,
+    (creds, mut region): (Option<Credentials>, Option<String>),
+) -> Result<Reply> {
+    let options = HttpOptions::from_env();
+    let agent = agent(&options);
     let base_url = |region: Option<&str>| match remote {
         Remote::S3(o) => format!("{}{query}", o.url(region)),
         Remote::Url(u) => append_query(u, query),
     };
-    // Signed requests cover the body (no `UNSIGNED-PAYLOAD`): a file is read once to hash it and
-    // again to send it, as docs/cli.md records.
+    // Signed requests cover the body (no `UNSIGNED-PAYLOAD`): a file whose hash is not known is
+    // read into memory when small, and otherwise once to hash it and again to send it, as
+    // docs/cli.md records.
+    let payload = if creds.is_some() { payload.for_signing()? } else { payload };
+    let payload = &payload;
     let payload_hash = if creds.is_some() { payload.sha256()? } else { String::new() };
     let length = payload.len()?;
     let mut url = base_url(region.as_deref());
@@ -332,7 +433,7 @@ fn write_request(
         let result = match payload {
             Payload::Empty => builder.body(()).map_err(|e| Error::Http(e.to_string())).map(|r| agent.run(r)),
             Payload::Bytes(b) => builder.body(b.as_slice()).map_err(|e| Error::Http(e.to_string())).map(|r| agent.run(r)),
-            Payload::File(p) => {
+            Payload::File(p, _) => {
                 let f = std::fs::File::open(p)?;
                 builder.body(f).map_err(|e| Error::Http(e.to_string())).map(|r| agent.run(r))
             }
@@ -395,7 +496,7 @@ fn write_request(
         let _ = response.into_body().into_reader().take(1 << 20).read_to_end(&mut body);
         super::REQUESTS.fetch_add(1, Ordering::Relaxed);
         super::BYTES.fetch_add(body.len() as u64, Ordering::Relaxed);
-        if (200..300).contains(&status) || (missing_ok && status == 404) {
+        if (200..300).contains(&status) || accept == Accept::Any || (accept == Accept::Missing && status == 404) {
             return Ok(Reply { status, body });
         }
         let text = String::from_utf8_lossy(&body[..body.len().min(300)]).into_owned();
@@ -451,7 +552,7 @@ pub(crate) fn put(remote: &Remote, payload: Payload) -> Result<()> {
         Remote::Url(_) => vec![("x-ms-blob-type".into(), "BlockBlob".into()), ("x-ms-version".into(), "2021-08-06".into())],
         Remote::S3(_) => Vec::new(),
     };
-    write_request("PUT", remote, "", &headers, &payload, false)?;
+    write_request("PUT", remote, "", &headers, payload, Accept::Success)?;
     Ok(())
 }
 
@@ -462,8 +563,100 @@ pub(crate) fn delete(remote: &Remote) -> Result<()> {
         Remote::Url(_) => vec![("x-ms-version".into(), "2021-08-06".into())],
         Remote::S3(_) => Vec::new(),
     };
-    write_request("DELETE", remote, "", &headers, &Payload::Empty, true)?;
+    write_request("DELETE", remote, "", &headers, Payload::Empty, Accept::Missing)?;
     Ok(())
+}
+
+/// The most keys of one `DeleteObjects` request, S3's limit.
+const MAX_DELETE_KEYS: usize = 1000;
+
+/// Deletes objects of an S3 bucket, in order: up to 1000 keys per `DeleteObjects` request
+/// (`POST ?delete`). A key XML cannot carry (a control character) is deleted with a request of its
+/// own, as is every key once the service refuses multi-object deletion (some S3-compatible
+/// services do not implement it). Missing objects are not errors; a key the service fails to
+/// delete is, after its batch.
+pub(crate) fn delete_objects(bucket: &str, keys: &[String]) -> Result<()> {
+    let one = |key: &str| delete(&Remote::S3(S3Object { bucket: bucket.to_string(), key: key.to_string() }));
+    let mut multi = true;
+    for chunk in keys.chunks(MAX_DELETE_KEYS) {
+        let (batch, single): (Vec<&str>, Vec<&str>) = chunk.iter().map(String::as_str).partition(|k| multi && xml_key(k).is_some());
+        if !batch.is_empty() && !delete_batch(bucket, &batch)? {
+            // Not implemented: one request per key from here on, as before.
+            multi = false;
+            batch.iter().try_for_each(|k| one(k))?;
+        }
+        single.iter().try_for_each(|k| one(k))?;
+    }
+    Ok(())
+}
+
+/// One `DeleteObjects` request, in quiet mode (only failures are reported). `false` when the
+/// service does not answer it with a `DeleteResult`.
+fn delete_batch(bucket: &str, keys: &[&str]) -> Result<bool> {
+    let mut xml = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8"?><Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>true</Quiet>"#,
+    );
+    for key in keys {
+        xml += &format!("<Object><Key>{}</Key></Object>", xml_key(key).unwrap_or_default());
+    }
+    xml += "</Delete>";
+    let body = xml.into_bytes();
+    let mut md5 = crate::vsi::md5::Md5::new();
+    md5.update(&body);
+    let headers = [("content-md5".to_string(), base64(&md5.finish())), ("content-type".to_string(), "application/xml".to_string())];
+    let bucket_url = Remote::S3(S3Object { bucket: bucket.to_string(), key: String::new() });
+    let reply = write_request("POST", &bucket_url, "?delete", &headers, Payload::Bytes(body), Accept::Any)?;
+    let text = String::from_utf8_lossy(&reply.body);
+    if !(200..300).contains(&reply.status) || !text.contains("<DeleteResult") {
+        return Ok(false);
+    }
+    // Missing keys are deleted already (some services report them).
+    let failed: Vec<(String, String)> = crate::vsi::listing::xml_elements(&text, "Error")
+        .into_iter()
+        .map(|e| {
+            let field = |name: &str| crate::vsi::listing::xml_elements(e, name).first().map(|v| crate::vsi::listing::xml_unescape(v));
+            (field("Key").unwrap_or_default(), format!("{}: {}", field("Code").unwrap_or_default(), field("Message").unwrap_or_default()))
+        })
+        .filter(|(_, error)| !error.starts_with("NoSuchKey:"))
+        .collect();
+    match failed.first() {
+        None => Ok(true),
+        Some((key, error)) => Err(Error::Http(format!(
+            "DeleteObjects: {} key(s) not deleted, the first s3://{bucket}/{key}: {}",
+            failed.len(),
+            error.trim_end_matches(": ")
+        ))),
+    }
+}
+
+/// A key as XML text, or `None` when XML 1.0 cannot carry it. Whitespace other than spaces is
+/// written as character references, which XML parsers do not normalize.
+fn xml_key(key: &str) -> Option<String> {
+    let mut out = String::with_capacity(key.len());
+    for c in key.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\t' | '\n' | '\r' => out.push_str(&format!("&#{};", c as u32)),
+            c if (c as u32) < 0x20 || c == '\u{FFFE}' || c == '\u{FFFF}' => return None,
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// Standard base64 with padding (for `Content-MD5`).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
 
 /// Copies an S3 object to another key of the same service, server side (no bytes through this
@@ -473,7 +666,8 @@ pub(crate) fn s3_copy(from: &S3Object, to: &S3Object, size: u64) -> Result<()> {
         return Err(Error::Unsupported(format!("{size} bytes: copies larger than 5 GiB (multipart copies) are not supported")));
     }
     let source = format!("/{}/{}", from.bucket, s3::uri_encode(&from.key, false));
-    let reply = write_request("PUT", &Remote::S3(to.clone()), "", &[("x-amz-copy-source".into(), source)], &Payload::Empty, false)?;
+    let reply =
+        write_request("PUT", &Remote::S3(to.clone()), "", &[("x-amz-copy-source".into(), source)], Payload::Empty, Accept::Success)?;
     // S3 may answer 200 with an error in the body.
     let text = String::from_utf8_lossy(&reply.body);
     if reply.status == 200 && text.contains("<Error>") {
@@ -484,7 +678,12 @@ pub(crate) fn s3_copy(from: &S3Object, to: &S3Object, size: u64) -> Result<()> {
 
 /// A local path's bytes as an upload.
 pub(crate) fn file_payload(path: &Path) -> Payload {
-    Payload::File(path.to_path_buf())
+    Payload::File(path.to_path_buf(), None)
+}
+
+/// A local path's bytes as an upload, with their SHA-256 (hex), computed as they were written.
+pub(crate) fn hashed_file_payload(path: &Path, sha256: String) -> Payload {
+    Payload::File(path.to_path_buf(), Some(sha256))
 }
 
 #[cfg(test)]
@@ -516,6 +715,69 @@ mod tests {
         reader.read_exact(&mut body).unwrap();
         write!(stream, "HTTP/1.1 {status} Test\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
         body
+    }
+
+    /// Answers one request with 200: its `x-amz-content-sha256` header and body.
+    fn signed_reply(mut stream: TcpStream) -> (String, Vec<u8>) {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let (mut length, mut hash, mut line) = (0, String::new(), String::new());
+        while reader.read_line(&mut line).unwrap() > 2 {
+            if let Some((key, value)) = line.split_once(':') {
+                match key.to_ascii_lowercase().as_str() {
+                    "content-length" => length = value.trim().parse().unwrap(),
+                    "x-amz-content-sha256" => hash = value.trim().to_string(),
+                    _ => {}
+                }
+            }
+            line.clear();
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        (hash, body)
+    }
+
+    #[test]
+    fn signed_file_uploads_read_the_file_once_when_they_can() {
+        use sha2::{Digest, Sha256};
+        let tmp = tempfile::tempdir().unwrap();
+        let creds = Credentials { access_key_id: "TESTKEY".into(), secret_access_key: "secret".into(), session_token: None };
+        let limit = SIGNED_BUFFER_LIMIT as usize;
+        // (size, hash known, bytes read besides sending the file): a small file is read into
+        // memory once and sent from there; a larger one is read to hash it, then sent; a file
+        // hashed as it was written is only sent. Before, each was read twice.
+        for (size, known, reads) in [(100_000, false, 100_000), (limit + 1, false, limit + 1), (100_000, true, 0)] {
+            let path = tmp.path().join(format!("upload-{size}-{known}"));
+            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&path, &data).unwrap();
+            let sha256 = s3::hex(&Sha256::digest(&data));
+            let payload = if known { hashed_file_payload(&path, sha256.clone()) } else { file_payload(&path) };
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let remote = Remote::Url(format!("http://{}/bucket/key", listener.local_addr().unwrap()));
+            let server = std::thread::spawn(move || signed_reply(listener.accept().unwrap().0));
+            FILE_READS.with(|c| c.set(0));
+            write_request_with("PUT", &remote, "", &[], payload, Accept::Success, (Some(creds.clone()), None)).unwrap();
+            let (hash, body) = server.join().unwrap();
+            assert_eq!(FILE_READS.with(|c| c.get()), reads as u64, "{size} bytes, hash known: {known}");
+            assert_eq!(hash, sha256);
+            assert!(body == data);
+        }
+    }
+
+    #[test]
+    fn delete_requests_escape_keys_and_encode_their_digest() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        // The MD5 of "hello\n", as `openssl md5 -binary | base64` prints it.
+        let mut md5 = crate::vsi::md5::Md5::new();
+        md5.update(b"hello\n");
+        assert_eq!(base64(&md5.finish()), "sZRqySSS0jR8YjW00mERhA==");
+        assert_eq!(xml_key("a&b<c>d\"e'f g\th\ni\rj").unwrap(), "a&amp;b&lt;c&gt;d\"e'f g&#9;h&#10;i&#13;j");
+        assert_eq!(xml_key("ctl\u{1}"), None);
+        assert_eq!(xml_key("\u{FFFF}"), None);
     }
 
     #[test]
@@ -586,7 +848,7 @@ mod tests {
             let remote = Remote::Url(format!("http://{}/upload", source.local_addr().unwrap()));
             let source_thread = std::thread::spawn(move || reply(source.accept().unwrap().0, status, &destination));
             let payload = b"upload body".to_vec();
-            let result = write_request("PUT", &remote, "", &[], &Payload::Bytes(payload.clone()), false);
+            let result = write_request("PUT", &remote, "", &[], Payload::Bytes(payload.clone()), Accept::Success);
             let _ = stop.send(());
             assert_eq!(source_thread.join().unwrap(), payload);
             assert!(destination_thread.join().unwrap().is_none(), "redirect target must receive no request or payload");
@@ -630,7 +892,7 @@ mod tests {
             (first, second)
         });
         let payload = b"upload body".to_vec();
-        write_request("PUT", &remote, "", &[], &Payload::Bytes(payload.clone()), false).unwrap();
+        write_request("PUT", &remote, "", &[], Payload::Bytes(payload.clone()), Accept::Success).unwrap();
         assert_eq!(server.join().unwrap(), (payload.clone(), payload));
     }
 }

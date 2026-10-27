@@ -86,15 +86,58 @@ pub(crate) fn is_virtual(p: &Path) -> bool {
     key(p).is_some()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The bytes of files in memory copied by [`read`] on this thread.
+    pub(crate) static COPIED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Reads a file, in memory or on disk.
 pub(crate) fn read(p: &Path) -> std::io::Result<Vec<u8>> {
     match key(p) {
         Some(k) => files()
             .get(&k)
-            .map(|b| b.as_ref().clone())
+            .map(|b| {
+                #[cfg(test)]
+                COPIED.with(|c| c.set(c.get() + b.len() as u64));
+                b.as_ref().clone()
+            })
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{k}: no such file"))),
         None => std::fs::read(p),
     }
+}
+
+/// The bytes of a file in memory, shared rather than copied: a [`std::io::Cursor`] reads them
+/// in place.
+pub(crate) fn read_shared(p: &Path) -> std::io::Result<SharedBytes> {
+    let k = key(p).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}: not in memory", p.display())))?;
+    files()
+        .get(&k)
+        .map(|b| SharedBytes(b.clone()))
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{k}: no such file")))
+}
+
+/// The bytes of a file in memory, shared with it.
+#[derive(Clone)]
+pub(crate) struct SharedBytes(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Moves a file in memory to another path, replacing any file there, without copying its bytes;
+/// returns its size.
+pub(crate) fn rename(from: &Path, to: &Path) -> std::io::Result<u64> {
+    let invalid = |p: &Path| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}: not in memory", p.display()));
+    let (from_key, to_key) = (key(from).ok_or_else(|| invalid(from))?, key(to).ok_or_else(|| invalid(to))?);
+    let mut f = files();
+    let bytes =
+        f.remove(&from_key).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{from_key}: no such file")))?;
+    let len = bytes.len() as u64;
+    f.insert(to_key, bytes);
+    Ok(len)
 }
 
 /// Writes a file, in memory or on disk.

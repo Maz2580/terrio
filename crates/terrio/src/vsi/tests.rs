@@ -1044,3 +1044,205 @@ fn writes_and_moves_preserve_special_destinations() {
     assert!(rename(&s(&source), &s(&socket)).is_err());
     assert!(fs::metadata(&socket).unwrap().file_type().is_socket());
 }
+
+/// A local HTTP server of `files` (path, bytes, `Content-Type`), keeping connections alive and
+/// honoring single byte ranges unless `ranges` is false. A directory `/d/` that is served is
+/// redirected to from `/d`, as web servers do. Every request is logged as `GET /path [range]`.
+#[cfg(remote)]
+struct FileServer {
+    base: String,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(remote)]
+impl FileServer {
+    fn start(files: Vec<(&str, Vec<u8>, Option<&str>)>, ranges: bool) -> Self {
+        use std::io::{BufRead, BufReader};
+        use std::sync::atomic::Ordering;
+        let files: std::collections::HashMap<String, (Vec<u8>, Option<String>)> =
+            files.into_iter().map(|(p, b, t)| (p.to_string(), (b, t.map(str::to_string)))).collect();
+        let files = std::sync::Arc::new(files);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (shared_log, counted) = (log.clone(), connections.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                counted.fetch_add(1, Ordering::Relaxed);
+                let (files, log) = (files.clone(), shared_log.clone());
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let path = line.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/").to_string();
+                        let mut range = None;
+                        loop {
+                            let mut h = String::new();
+                            if reader.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                                break;
+                            }
+                            if let Some((k, v)) = h.split_once(':')
+                                && k.eq_ignore_ascii_case("range")
+                            {
+                                range = Some(v.trim().to_string());
+                            }
+                        }
+                        log.lock().unwrap().push(format!("GET {path}{}", range.as_ref().map(|r| format!(" {r}")).unwrap_or_default()));
+                        let (status, mut extra, body) = match files.get(&path) {
+                            None if files.contains_key(&format!("{path}/")) => {
+                                ("301 Moved Permanently", format!("Location: {path}/\r\n"), Vec::new())
+                            }
+                            None => ("404 Not Found", String::new(), Vec::new()),
+                            Some((data, kind)) => {
+                                let kind = kind.as_ref().map(|t| format!("Content-Type: {t}\r\n")).unwrap_or_default();
+                                let len = data.len();
+                                let wanted = range.filter(|_| ranges && len > 0).and_then(|r| {
+                                    let (a, b) = r.strip_prefix("bytes=")?.split_once('-')?;
+                                    Some(match (a.parse::<usize>().ok(), b.parse::<usize>().ok()) {
+                                        (Some(a), Some(b)) => (a, b.min(len - 1)),
+                                        (Some(a), None) => (a, len - 1),
+                                        (None, Some(n)) => (len.saturating_sub(n), len - 1),
+                                        (None, None) => return None,
+                                    })
+                                });
+                                match wanted {
+                                    Some((a, b)) => (
+                                        "206 Partial Content",
+                                        format!("{kind}Content-Range: bytes {a}-{b}/{len}\r\n"),
+                                        data[a..=b].to_vec(),
+                                    ),
+                                    None => ("200 OK", kind, data.clone()),
+                                }
+                            }
+                        };
+                        extra += &format!("Content-Length: {}\r\n", body.len());
+                        // One write, so that the body does not wait for the head's acknowledgement.
+                        let mut response = format!("HTTP/1.1 {status}\r\n{extra}\r\n").into_bytes();
+                        response.extend_from_slice(&body);
+                        if stream.write_all(&response).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self { base, log, connections }
+    }
+
+    /// The requests logged since the last call.
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.log.lock().unwrap())
+    }
+}
+
+#[cfg(remote)]
+#[test]
+fn plain_http_files_are_stated_without_an_index_probe() {
+    let index = b"<html><title>Index of /dir/</title><a href='a.tif'>a.tif</a></html>".to_vec();
+    let data = vec![7u8; 100_000];
+    for ranges in [true, false] {
+        let server = FileServer::start(
+            vec![
+                ("/data.tif", data.clone(), Some("image/tiff")),
+                ("/page.html", b"<html><a href='x'>x</a></html>".to_vec(), Some("text/html; charset=utf-8")),
+                ("/untyped", b"bytes".to_vec(), None),
+                ("/dir/", index.clone(), Some("text/html")),
+                ("/dir/a.tif", data.clone(), Some("image/tiff")),
+            ],
+            ranges,
+        );
+        let base = &server.base;
+        let one = " bytes=0-0";
+        // A typed file: one request, and the payload for a copy (before: an index probe of
+        // `data.tif/` first, so 2 and 3).
+        let entry = stat(&format!("{base}/data.tif")).unwrap().unwrap();
+        assert_eq!((entry.is_dir(), entry.size), (false, Some(data.len() as u64)));
+        assert_eq!(server.take(), [format!("GET /data.tif{one}")]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("copied.tif");
+        assert_eq!(copy(&format!("{base}/data.tif"), &s(&out), &CopyOptions::default()).unwrap().bytes, data.len() as u64);
+        assert_eq!(fs::read(&out).unwrap(), data);
+        assert_eq!(server.take(), [format!("GET /data.tif{one}"), "GET /data.tif".to_string()]);
+        // HTML and untyped responses may be index pages: probed as before.
+        for name in ["page.html", "untyped"] {
+            assert!(!stat(&format!("{base}/{name}")).unwrap().unwrap().is_dir());
+            assert_eq!(server.take(), [format!("GET /{name}{one}"), format!("GET /{name}/")]);
+        }
+        // Directories: listing (and a trailing slash) fetch the index page first, once.
+        assert_eq!(names(&list(&format!("{base}/dir"), &ListOptions::default()).unwrap()), ["a.tif"]);
+        assert_eq!(server.take(), ["GET /dir/"]);
+        assert!(stat(&format!("{base}/dir/")).unwrap().unwrap().is_dir());
+        assert_eq!(server.take(), ["GET /dir/"]);
+        // Without the slash, the redirect is followed to an HTML page, then probed.
+        assert!(stat(&format!("{base}/dir")).unwrap().unwrap().is_dir());
+        assert_eq!(server.take(), [format!("GET /dir{one}"), format!("GET /dir/{one}"), "GET /dir/".to_string()]);
+        assert!(stat(&format!("{base}/missing")).unwrap().is_none());
+        assert_eq!(server.take(), [format!("GET /missing{one}"), "GET /missing/".to_string()]);
+    }
+}
+
+#[cfg(remote)]
+#[test]
+fn remote_zip_members_are_read_through_one_reader() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut bytes = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+        for i in 0..20 {
+            zip.start_file(format!("m{i:02}.txt"), zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(format!("member {i}\n").repeat(100).as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    let server = FileServer::start(vec![("/a.zip", bytes, Some("application/zip"))], true);
+    let root = format!("/vsizip//vsicurl/{}/a.zip", server.base);
+    let out = tmp.path().join("out");
+    let report = copy(&root, &s(&out), &CopyOptions { recursive: true, ..Default::default() }).unwrap();
+    assert_eq!(report.copied, 20);
+    assert_eq!(fs::read_to_string(out.join("m07.txt")).unwrap(), "member 7\n".repeat(100));
+    let log = server.take();
+    // The archive's stat, the central directory by 16 KiB blocks, then one 64 KiB block that
+    // holds every member (before: one per member, 20).
+    let payload = log.iter().filter(|l| l.ends_with("bytes=0-65535")).count();
+    assert_eq!(payload, 1, "{log:?}");
+    assert!(log.len() <= 4, "{log:?}");
+    // All of it over one connection.
+    assert_eq!(server.connections.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn memory_archives_and_moves_do_not_copy_bytes() {
+    let mut bytes = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+        for name in ["a.txt", "b/c.txt"] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(name.repeat(1000).as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    write("/vsimem/vsi_nocopy/a.zip", &bytes).unwrap();
+    crate::memfs::COPIED.with(|c| c.set(0));
+    let root = "/vsizip//vsimem/vsi_nocopy/a.zip";
+    assert_eq!(names(&list(root, &ListOptions { recursive: true, ..Default::default() }).unwrap()), ["a.txt", "b", "b/c.txt"]);
+    assert_eq!(read(&format!("{root}/b/c.txt")).unwrap(), "b/c.txt".repeat(1000).as_bytes());
+    copy(root, "/vsimem/vsi_nocopy/out", &CopyOptions { recursive: true, ..Default::default() }).unwrap();
+    assert_eq!(read("/vsimem/vsi_nocopy/out/a.txt").unwrap(), "a.txt".repeat(1000).as_bytes());
+    // The archive is read in place (before: copied for the listing and for each member).
+    assert_eq!(crate::memfs::COPIED.with(|c| c.get()), 0);
+    // A move re-keys the bytes (before: read, written and removed, two copies).
+    let before = crate::memfs::read_shared(Path::new("/vsimem/vsi_nocopy/a.zip")).unwrap();
+    let report = rename("/vsimem/vsi_nocopy/a.zip", "/vsimem/vsi_nocopy/moved.zip").unwrap();
+    assert_eq!((report.copied, report.bytes), (1, bytes.len() as u64));
+    let after = crate::memfs::read_shared(Path::new("/vsimem/vsi_nocopy/moved.zip")).unwrap();
+    assert_eq!(before.as_ref().as_ptr(), after.as_ref().as_ptr());
+    assert!(stat("/vsimem/vsi_nocopy/a.zip").unwrap().is_none());
+    assert_eq!(crate::memfs::COPIED.with(|c| c.get()), 0);
+    delete("/vsimem/vsi_nocopy", true).unwrap();
+}

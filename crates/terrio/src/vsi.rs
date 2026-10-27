@@ -27,7 +27,7 @@
 //! report zero copied files/bytes, since no file payloads were copied.
 
 pub(crate) mod listing;
-mod md5;
+pub(crate) mod md5;
 pub(crate) mod zipdir;
 
 pub use listing::RemoteLister;
@@ -502,7 +502,7 @@ fn stat_node(node: &Node) -> Result<Option<Stat>> {
         #[cfg(remote)]
         Node::S3 { key, .. } if key.is_empty() => Ok(Some(Stat::directory())),
         #[cfg(remote)]
-        Node::S3 { .. } | Node::Url { .. } => remote_stat(node),
+        Node::S3 { .. } | Node::Url { .. } => remote_stat(node, false),
         #[cfg(not(remote))]
         Node::S3 { .. } | Node::Url { .. } => Err(Error::Unsupported(remote_disabled_message())),
         Node::Archive { .. } => {
@@ -523,6 +523,21 @@ fn stat_node(node: &Node) -> Result<Option<Stat>> {
             Ok(entries.iter().any(|e| e.name.starts_with(&prefix)).then(Stat::directory))
         }
     }
+}
+
+/// What is at a location given as `input`: [`stat_node`], except that a plain HTTP URL is probed
+/// as an HTML index page first when a directory is expected (a `listing`, or `input` ending with
+/// `/`), as a file otherwise.
+fn stat_input(input: &str, node: &Node, listing: bool) -> Result<Option<Stat>> {
+    #[cfg(remote)]
+    if let Node::Url { .. } = node
+        && (listing || input.trim().ends_with('/'))
+    {
+        return remote_stat(node, true);
+    }
+    #[cfg(not(remote))]
+    let _ = (input, listing);
+    stat_node(node)
 }
 
 fn archive_parts(node: &Node) -> (&Node, ArchiveKind, &str) {
@@ -558,8 +573,11 @@ fn forget_html_page() {
 #[cfg(not(remote))]
 fn forget_html_page() {}
 
+/// What is at a remote location. A plain HTTP URL is a directory when its index page lists
+/// entries: with `index_first`, that page is fetched first (one request for a directory); without,
+/// the URL is (one request for a file of a type other than HTML, which no index page is).
 #[cfg(remote)]
-fn remote_stat(node: &Node) -> Result<Option<Stat>> {
+fn remote_stat(node: &Node, index_first: bool) -> Result<Option<Stat>> {
     use crate::http::store;
     let remote = node.remote().ok_or_else(|| Error::InvalidArgument("not remote".into()))?;
     let dir = node.directory().ok_or_else(|| Error::InvalidArgument("not remote".into()))?;
@@ -583,6 +601,13 @@ fn remote_stat(node: &Node) -> Result<Option<Stat>> {
         // A "directory": a prefix with keys below it.
         return Ok(store::has_entries(&dir)?.filter(|&any| any).map(|_| Stat::directory()));
     }
+    let file = |s: store::ObjectStat| Stat { dir: false, size: s.size, modified: s.modified, permissions: None, etag: s.etag };
+    let object = if index_first { None } else { Some(store::stat(&remote)?) };
+    if let Some(Some(s)) = &object
+        && s.content_type.as_deref().is_some_and(|t| !listing::is_html_type(t))
+    {
+        return Ok(object.flatten().map(file));
+    }
     // A plain HTTP server: a directory when its index page lists entries.
     if let Node::Url { base, query } = node
         && let Some(l) = list_html_cached(&if query.is_empty() { base.clone() } else { format!("{base}?{query}") })?
@@ -590,7 +615,11 @@ fn remote_stat(node: &Node) -> Result<Option<Stat>> {
     {
         return Ok(Some(Stat::directory()));
     }
-    Ok(store::stat(&remote)?.map(|s| Stat { dir: false, size: s.size, modified: s.modified, permissions: None, etag: s.etag }))
+    Ok(match object {
+        Some(object) => object,
+        None => store::stat(&remote)?,
+    }
+    .map(file))
 }
 
 /// The entries below a directory node (`recursive`: at any depth), named relative to it.
@@ -784,12 +813,18 @@ fn with_archive_reader<T>(archive: &Node, metadata_only: bool, f: impl FnOnce(&m
             let mut file = std::io::BufReader::new(std::fs::File::open(p).map_err(|e| io_context(e, &p.display().to_string()))?);
             f(&mut file)
         }
-        Node::Mem(k) => {
-            let bytes = crate::memfs::read(Path::new(k))?;
-            f(&mut std::io::Cursor::new(bytes))
-        }
+        // Read in place, not copied.
+        Node::Mem(k) => f(&mut std::io::Cursor::new(crate::memfs::read_shared(Path::new(k))?)),
         #[cfg(remote)]
         Node::S3 { .. } | Node::Url { .. } => {
+            // One payload reader per archive and operation: member reads share its connection and
+            // block cache instead of each fetching a first block.
+            if !metadata_only
+                && let Some(mut reader) =
+                    ARCHIVE_READER.with(|c| c.borrow().as_ref().filter(|(node, _)| node == archive).map(|(_, r)| r.clone()))
+            {
+                return f(&mut reader);
+            }
             let remote = archive.remote().ok_or_else(|| Error::InvalidArgument("not remote".into()))?;
             // Small blocks for metadata discovery; payload reads use the default
             // larger blocks to avoid one HTTP request per 16 KiB of member data.
@@ -801,6 +836,10 @@ fn with_archive_reader<T>(archive: &Node, metadata_only: bool, f: impl FnOnce(&m
                 options.block_size = 16 * 1024;
             }
             let mut reader = crate::http::RangeReader::open_with(&remote, options)?;
+            if !metadata_only {
+                // Clones share the cache, each with its own position.
+                ARCHIVE_READER.with(|c| *c.borrow_mut() = Some((archive.clone(), reader.clone())));
+            }
             f(&mut reader)
         }
         #[cfg(not(remote))]
@@ -833,6 +872,19 @@ struct ZipIndex {
 
 thread_local! {
     static ZIP_INDEX: std::cell::RefCell<Option<(Node, std::rc::Rc<ZipIndex>)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(remote)]
+thread_local! {
+    /// The reader of the last remote archive whose members were read in this operation.
+    static ARCHIVE_READER: std::cell::RefCell<Option<(Node, crate::http::RangeReader)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Forgets the archive index and reader of the last operation.
+fn forget_archive() {
+    ZIP_INDEX.with(|cache| *cache.borrow_mut() = None);
+    #[cfg(remote)]
+    ARCHIVE_READER.with(|cache| *cache.borrow_mut() = None);
 }
 
 fn zip_index(archive: &Node, reader: &mut dyn ReadSeek) -> Result<std::rc::Rc<ZipIndex>> {
@@ -1001,19 +1053,26 @@ fn copy_tar_entries<R: Read>(entries: tar::Entries<'_, R>, inner: &str, out: &mu
     Err(not_found(inner))
 }
 
-/// Restricts the last HTML page cache to one public operation, including error exits.
-struct HtmlCacheScope;
+/// Restricts the last HTML page and archive caches to one public operation, including error
+/// exits; its HTTP requests share one agent (and its connections).
+struct HtmlCacheScope {
+    #[cfg(remote)]
+    _agent: crate::http::AgentScope,
+}
 impl HtmlCacheScope {
     fn new() -> Self {
         forget_html_page();
-        ZIP_INDEX.with(|cache| *cache.borrow_mut() = None);
-        Self
+        forget_archive();
+        Self {
+            #[cfg(remote)]
+            _agent: crate::http::AgentScope::new(),
+        }
     }
 }
 impl Drop for HtmlCacheScope {
     fn drop(&mut self) {
         forget_html_page();
-        ZIP_INDEX.with(|cache| *cache.borrow_mut() = None);
+        forget_archive();
     }
 }
 
@@ -1038,9 +1097,9 @@ fn read_into(node: &Node, out: &mut dyn Write) -> Result<u64> {
             Ok(std::io::copy(&mut f, out)?)
         }
         Node::Mem(k) => {
-            let bytes = crate::memfs::read(Path::new(k)).map_err(|e| io_context(e, k))?;
-            out.write_all(&bytes)?;
-            Ok(bytes.len() as u64)
+            let bytes = crate::memfs::read_shared(Path::new(k)).map_err(|e| io_context(e, k))?;
+            out.write_all(bytes.as_ref())?;
+            Ok(bytes.as_ref().len() as u64)
         }
         #[cfg(remote)]
         Node::S3 { .. } | Node::Url { .. } => {
@@ -1182,20 +1241,36 @@ fn copy_file(src: &Node, dst: &Node, known_size: Option<u64>) -> Result<u64> {
                     store::put(&remote, store::file_payload(p))?;
                     Ok(size)
                 }
-                _ => {
-                    // Through a temporary file.
-                    let mut tmp = tempfile::NamedTempFile::new()?;
-                    let n = read_into(src, tmp.as_file_mut())?;
-                    tmp.as_file_mut().flush()?;
-                    store::put(&remote, store::file_payload(tmp.path()))?;
-                    Ok(n)
-                }
+                // Through a temporary file.
+                _ => upload_spooled(&remote, |out| read_into(src, out)),
             }
         }
         #[cfg(not(remote))]
         Node::S3 { .. } | Node::Url { .. } => Err(Error::Unsupported(remote_disabled_message())),
         Node::Archive { .. } => Err(Error::Unsupported("archives are read only".into())),
     }
+}
+
+/// Uploads the bytes `fill` writes, through a temporary file. They are hashed as they are written
+/// for an S3 upload, whose signature covers them, so that the file is read once, to send it.
+#[cfg(remote)]
+fn upload_spooled(remote: &crate::http::Remote, fill: impl FnOnce(&mut dyn Write) -> Result<u64>) -> Result<u64> {
+    use crate::http::store;
+    let mut tmp = tempfile::NamedTempFile::new()?;
+    let (n, sha256) = if matches!(remote, crate::http::Remote::S3(_)) {
+        let mut out = store::HashingWriter::new(tmp.as_file_mut());
+        let n = fill(&mut out)?;
+        (n, Some(out.finish()))
+    } else {
+        (fill(tmp.as_file_mut())?, None)
+    };
+    tmp.as_file_mut().flush()?;
+    let payload = match sha256 {
+        Some(sha256) => store::hashed_file_payload(tmp.path(), sha256),
+        None => store::file_payload(tmp.path()),
+    };
+    store::put(remote, payload)?;
+    Ok(n)
 }
 
 fn make_dir(node: &Node) -> Result<()> {
@@ -1313,7 +1388,7 @@ pub fn list(path: &str, options: &ListOptions) -> Result<Vec<Entry>> {
 fn list_inner(path: &str, options: &ListOptions) -> Result<(bool, Vec<Entry>)> {
     let _cache = HtmlCacheScope::new();
     let node = Node::parse(path)?;
-    let stat = stat_node(&node)?.ok_or_else(|| not_found(path))?;
+    let stat = stat_input(path, &node, true)?.ok_or_else(|| not_found(path))?;
     if !stat.dir {
         let name = if options.absolute { absolute_name(path, &node, "") } else { listing::redact_url(path.trim()).into_owned() };
         return Ok((true, vec![stat.entry(name)]));
@@ -1458,7 +1533,7 @@ fn absolute_name(path: &str, node: &Node, name: &str) -> String {
 pub fn stat(path: &str) -> Result<Option<Entry>> {
     let _cache = HtmlCacheScope::new();
     let node = Node::parse(path)?;
-    Ok(stat_node(&node)?.map(|s| s.entry(listing::redact_url(path.trim()).into_owned())))
+    Ok(stat_input(path, &node, false)?.map(|s| s.entry(listing::redact_url(path.trim()).into_owned())))
 }
 
 /// Where a file or directory copied to `dst` goes: into `dst` when it is an existing directory
@@ -1477,7 +1552,7 @@ pub fn copy(src: &str, dst: &str, options: &CopyOptions) -> Result<Report> {
     let _cache = HtmlCacheScope::new();
     let src_node = Node::parse(src)?;
     let dst_node = Node::parse(dst)?;
-    let stat = stat_node(&src_node)?.ok_or_else(|| not_found(src))?;
+    let stat = stat_input(src, &src_node, false)?.ok_or_else(|| not_found(src))?;
     let target = copy_target(&src_node, dst, &dst_node)?;
     let mut report = Report::default();
     if !stat.dir {
@@ -1589,12 +1664,8 @@ fn write_member(dst: &Node, reader: &mut dyn Read) -> Result<u64> {
         }
         #[cfg(remote)]
         Node::S3 { .. } | Node::Url { .. } => {
-            let mut tmp = tempfile::NamedTempFile::new()?;
-            let copied = std::io::copy(reader, tmp.as_file_mut())?;
-            tmp.as_file_mut().flush()?;
             let remote = dst.remote().ok_or_else(|| Error::InvalidArgument("not remote".into()))?;
-            crate::http::store::put(&remote, crate::http::store::file_payload(tmp.path()))?;
-            Ok(copied)
+            upload_spooled(&remote, |out| Ok(std::io::copy(reader, out)?))
         }
         _ => Err(Error::Unsupported("the target does not support streamed archive extraction".into())),
     }
@@ -1935,21 +2006,22 @@ pub fn delete(path: &str, recursive: bool) -> Result<Report> {
     if entries.iter().any(|e| unsafe_child_name(&e.name, false)) {
         return Err(Error::InvalidArgument("refusing dot segments or absolute names in recursive deletion".into()));
     }
+    #[cfg(remote)]
+    if let Node::S3 { bucket, key } = &node {
+        // The objects, then the directory markers (zero-byte `prefix/` keys, listed with a size)
+        // deepest first and the directory's own: up to 1000 keys per request.
+        let mut keys: Vec<String> = entries.iter().filter(|e| !e.is_dir()).map(|e| join_key(key, &e.name)).collect();
+        let files = keys.len() as u64;
+        keys.extend(entries.iter().rev().filter(|e| e.is_dir() && e.size.is_some()).map(|e| format!("{key}/{}/", e.name)));
+        keys.push(format!("{key}/"));
+        crate::http::store::delete_objects(bucket, &keys)?;
+        report.deleted += files;
+        return Ok(report);
+    }
     for e in &entries {
         if !e.is_dir() {
             delete_file(&node.join(&e.name))?;
             report.deleted += 1;
-        }
-    }
-    // S3 directory markers (zero-byte `prefix/` keys, listed with a size): deepest first, then
-    // the directory's own.
-    if let Node::S3 { bucket, key } = &node {
-        let mut markers: Vec<String> =
-            entries.iter().filter(|e| e.is_dir() && e.size.is_some()).map(|e| format!("{key}/{}/", e.name)).collect();
-        markers.reverse();
-        markers.push(format!("{key}/"));
-        for marker in markers {
-            delete_file(&Node::S3 { bucket: bucket.clone(), key: marker })?;
         }
     }
     // An exact object that coexists with keys below it is kept, as GDAL keeps it: recursive
@@ -2095,16 +2167,12 @@ pub fn rename(src: &str, dst: &str) -> Result<Report> {
             Err(e) => return Err(Error::Io(std::io::Error::new(e.kind(), format!("moving '{src}' to '{}': {e}", b.display())))),
         }
     }
-    if let (Node::Mem(a), Node::Mem(b)) = (&src_node, &target) {
-        let mut report = Report::default();
-        if !stat.dir {
-            let bytes = crate::memfs::read(Path::new(a))?;
-            report.bytes = bytes.len() as u64;
-            crate::memfs::write(Path::new(b), bytes)?;
-            crate::memfs::remove_file(Path::new(a));
-            report.copied = 1;
-            return Ok(report);
-        }
+    if let (Node::Mem(a), Node::Mem(b)) = (&src_node, &target)
+        && !stat.dir
+    {
+        // Re-keyed in place, not copied.
+        let bytes = crate::memfs::rename(Path::new(a), Path::new(b))?;
+        return Ok(Report { copied: 1, bytes, ..Default::default() });
     }
     // Copy, then delete what was copied. Local rename above preserves native links/names;
     // the fallback must reject anything its portable copy cannot faithfully represent.
@@ -2128,7 +2196,7 @@ pub fn sync(src: &str, dst: &str, options: &SyncOptions) -> Result<Report> {
     let _cache = HtmlCacheScope::new();
     let src_node = Node::parse(src)?;
     let dst_node = Node::parse(dst)?;
-    let stat = stat_node(&src_node)?.ok_or_else(|| not_found(src))?;
+    let stat = stat_input(src, &src_node, false)?.ok_or_else(|| not_found(src))?;
     let mut report = Report::default();
     if !stat.dir {
         let target = copy_target(&src_node, dst, &dst_node)?;

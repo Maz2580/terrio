@@ -808,6 +808,20 @@ uses 4 requests and 98,304 bytes instead of 131 requests and 8,421,376 bytes, be
 payloads are skipped with seeks. Both outputs match the source SHA-256. These client body-read
 counts exclude any transport prefetch beyond the consumed stream and are not timing claims.
 
+Request and I/O costs from #335, measured with the previous and updated CLI (`--stats`, a
+connection-counting proxy, and `/proc` read counts) against nginx 1.29 (ranges honored) and
+Python's `http.server` (ranges ignored): copying a typed 1 MB file uses 2 requests instead of 3
+on both, with the same bytes; listings of `dir` and `dir/` still use 1. Extracting a 20-member
+remote zip uses 3 requests and 4,465 bytes instead of 23 and 46,873, over 1 connection instead
+of 23; a 5-file directory copy uses 1 connection instead of 6. Against a moto S3 server,
+recursively deleting 200 objects uses 4 requests instead of 204, and a signed 6 MB upload reads
+6.0 MB locally instead of 12.0 MB (a 20 MB upload still reads 40 MB). The mock S3 server of
+`terrio-cli/tests/vsi.rs` checks 1,503 keys in 2 `DeleteObjects` requests, per-key failures,
+the fallback to one `DELETE` per key, and 36 upload requests over at most 3 connections; unit
+regressions count requests and connections for plain HTTP stats and remote zip members, and
+copies of `/vsimem/` archives and moves (none). `compare_vsi_with_gdal.py` reports the same 25
+identical rows before and after.
+
 
 ```sh
 python scripts/compare_vsi_with_gdal.py ../terrio-data --terrio target/release/terrio

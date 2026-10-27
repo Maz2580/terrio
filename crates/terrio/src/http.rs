@@ -328,9 +328,61 @@ impl Client {
     }
 }
 
+thread_local! {
+    /// The agent shared by the requests of the operation in progress on this thread (see
+    /// [`AgentScope`]), with the settings it was built with.
+    static SHARED_AGENT: std::cell::RefCell<(u32, Option<(AgentSettings, ureq::Agent)>)> = const { std::cell::RefCell::new((0, None)) };
+}
+
+/// The settings an agent is built with.
+type AgentSettings = (Option<Duration>, Duration, String);
+
+/// While alive, the requests made on this thread share one agent, and so its connections (and
+/// TLS sessions): a recursive upload, deletion or listing opens one connection per host rather
+/// than one per request. Scopes nest; the agent is dropped when the outermost one ends.
+pub(crate) struct AgentScope(());
+
+impl AgentScope {
+    pub(crate) fn new() -> Self {
+        SHARED_AGENT.with(|shared| shared.borrow_mut().0 += 1);
+        Self(())
+    }
+}
+
+impl Drop for AgentScope {
+    fn drop(&mut self) {
+        SHARED_AGENT.with(|shared| {
+            let mut shared = shared.borrow_mut();
+            shared.0 = shared.0.saturating_sub(1);
+            if shared.0 == 0 {
+                shared.1 = None;
+            }
+        });
+    }
+}
+
 /// The agent requests are sent with: no automatic redirects (followed by [`Client`], which
-/// signs only the first request), no compression.
+/// signs only the first request), no compression. Within an [`AgentScope`], the scope's agent
+/// when its settings are the same.
 fn agent(options: &HttpOptions) -> ureq::Agent {
+    let settings: AgentSettings = (options.timeout, options.connect_timeout, options.user_agent.clone());
+    SHARED_AGENT.with(|shared| {
+        let mut shared = shared.borrow_mut();
+        if shared.0 == 0 {
+            return new_agent(options);
+        }
+        match &shared.1 {
+            Some((s, agent)) if *s == settings => agent.clone(),
+            _ => {
+                let agent = new_agent(options);
+                shared.1 = Some((settings, agent.clone()));
+                agent
+            }
+        }
+    })
+}
+
+fn new_agent(options: &HttpOptions) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)

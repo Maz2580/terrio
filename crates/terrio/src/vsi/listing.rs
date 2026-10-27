@@ -70,6 +70,11 @@ fn with_slash(p: &str) -> String {
     if p.is_empty() { String::new() } else { format!("{}/", p.trim_end_matches('/')) }
 }
 
+/// Whether a media type (lowercase) is HTML, as index pages are.
+pub(crate) fn is_html_type(content_type: &str) -> bool {
+    content_type.starts_with("text/html") || content_type.starts_with("application/xhtml+xml")
+}
+
 pub(crate) fn looks_like_index(data: &[u8]) -> bool {
     let head = String::from_utf8_lossy(data).to_ascii_lowercase();
     ["<title>index of", "<h1>index of", "directory listing for", "<!-- autoindex"].iter().any(|tag| head.contains(tag))

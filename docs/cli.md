@@ -1519,9 +1519,16 @@ Bucket/container roots are synthetic directories across S3, GCS and Azure URL fo
 `stat` does not verify their existence or access. Listing performs that verification.
 Recursive deletes stop at the first failure and can leave a partially deleted tree or prefix;
 the error does not include a partial deletion count. Inspect the remaining entries before retrying.
-An untyped HTTP file copy currently uses three requests: a bounded 4096-byte index sniff,
-a one-byte size probe, and the payload GET. A server may send additional bytes before the
-sniff connection closes; `--stats` counts bytes consumed by Terrio, not packets on the wire.
+A plain HTTP URL is first requested for one byte when it is copied, synchronized or described
+without a trailing `/`: a response typed other than HTML is a file, so a copy uses two
+requests (that probe and the payload GET), also from servers that ignore `Range`. An HTML or
+untyped response, or a missing one, is then probed as an index page (a bounded 4096-byte sniff
+of `URL/`), so an untyped file copy uses three requests; a directory named without its `/`
+costs that one extra request. Listings, and URLs ending with `/`, fetch the index page first.
+A server may send additional bytes before the sniff connection closes; `--stats` counts bytes
+consumed by Terrio, not packets on the wire. The requests of one command share connections
+(and TLS sessions) to a host, and a remote archive's members are read through one reader and
+its block cache.
 Credential-bearing URL queries are redacted in diagnostics and listing names.
 VSI mutation/listing operations require complete object-store listings; capped
 read-only subdirectory discovery retains its existing warning and partial results
@@ -1529,14 +1536,20 @@ for readers such as Zarr.
 
 Recursive object-store listings include directories implied by keys; GDAL omits those
 implied directory entries. `--skip-errors` continues copying but exits nonzero when
-any files fail. Signed S3 file uploads read the source once to calculate its SHA-256 and once
-to send the body (twice the file size in local reads); ETag sync can add a separate MD5 pass.
-Payload hashes are retained for compatibility with signed endpoints that require them.
+any files fail. Signed S3 uploads of local files up to 8 MiB read them once, into memory, to
+calculate their SHA-256 and send them; larger files are read once to calculate it and once to
+send the body (twice the file size in local reads). Uploads staged through a temporary file
+(from remote, in-memory or archive sources) are hashed as they are staged, and read once.
+ETag sync can add a separate MD5 pass. Payload hashes are retained (no `UNSIGNED-PAYLOAD`) for
+compatibility with signed endpoints that require them. Recursive S3 deletion sends up to 1,000
+keys per `DeleteObjects` request, reporting the first key the service could not delete; a
+service that does not implement it is sent one `DELETE` per key, as are keys with control
+characters, which XML cannot carry. Azure blobs are deleted one request each.
 
 Differences from GDAL (checked with 3.13.3): entries are sorted (GDAL prints local directories in the order
 the file system returns them); dates are UTC (a zip member's date is its stored DOS time, as
 GDAL prints it); HTTP index names stay percent-encoded, as GDAL keeps them. Not supported:
-`sync -j/--num-threads` (requests are sequential, including one S3 delete request per key), multipart uploads (objects over 5 GiB), Azure
+`sync -j/--num-threads` (requests are sequential), multipart uploads (objects over 5 GiB), Azure
 shared-key authentication, writing to Google Cloud Storage's own API, empty directory
 creation on destinations that cannot represent them (local directories are supported; S3 uses marker keys), progress bars, and the virtual file
 systems `/vsigzip/`, `/vsi7z/`, `/vsirar/`, `/vsiswift/`, `/vsioss/`, `/vsiadls/`, `/vsihdfs/`
