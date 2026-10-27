@@ -141,8 +141,9 @@ struct RawWindow {
     inputs: Vec<String>,
 }
 
-/// The most bytes read at once: rows next to each other are read together up to this size, so
-/// that a whole raster is read without holding its file in memory.
+/// The most bytes read at once: rows next to each other are read together up to this size (a row
+/// is never split, so a row longer than this is read alone), so that a whole raster is read
+/// without holding its file in memory.
 const RAW_READ_BYTES: usize = 16 << 20;
 
 #[cfg(test)]
@@ -305,6 +306,10 @@ trait ReadSeek: std::io::Read + std::io::Seek {}
 impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
 
 impl crate::cog::WindowSource for RawWindow {
+    fn whole_read_keeps_metadata(&self) -> bool {
+        true
+    }
+
     fn overviews(&self) -> Vec<(usize, usize)> {
         Vec::new()
     }

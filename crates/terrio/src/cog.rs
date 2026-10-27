@@ -168,6 +168,11 @@ pub(crate) trait WindowSource: Send + Sync {
     fn alpha_band(&self) -> Option<usize> {
         None
     }
+    /// Whether [`LazyRaster::read`] gives the dataset's metadata items, as the driver's eager
+    /// read does, rather than a window's.
+    fn whole_read_keeps_metadata(&self) -> bool {
+        false
+    }
     /// The sizes `(width, height)` of the overviews, largest first.
     fn overviews(&self) -> Vec<(usize, usize)>;
     /// The block size `(width, height)` reads are best aligned to, when the format has one.
@@ -766,9 +771,11 @@ impl LazyRaster {
     pub fn read(&mut self) -> Result<RasterDataset> {
         let window = Window::full(self.width(), self.height());
         let mut ds = self.read_window(window, &WindowOptions::default())?;
-        // The whole image of another driver's source, as that driver reads it whole: with the
-        // dataset's metadata items, which a window leaves out.
-        if let Inner::Source(header, _) = &self.inner {
+        // The whole image of a source read whole with its dataset's metadata items (which a
+        // window leaves out), as its driver reads it eagerly.
+        if let Inner::Source(header, source) = &self.inner
+            && source.whole_read_keeps_metadata()
+        {
             ds.raster.metadata = header.raster.metadata.clone();
         }
         Ok(ds)
