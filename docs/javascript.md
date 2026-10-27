@@ -257,6 +257,44 @@ const simple = simplify(counties, 0.01);
 const sorted = sort(simple, { method: "hilbert" });
 ```
 
+## Vector datasets
+
+```js
+const merged = terrio.concat([countries, { bytes: usBytes, filename: "us.gpkg" }], { mode: "single", sourceLayerFieldName: "source" });
+const parts = terrio.partition(counties, { fields: ["STATE"], format: "GPKG" }); // [{ path, bytes }]
+const typed = terrio.setFieldType(countries, "Integer64", { fieldName: "POP_EST" });
+const points = terrio.makePoint(trace, "longitude", "latitude", { crs: "EPSG:4326" });
+const schema = terrio.exportSchema(countries); // the OGR_SCHEMA object
+const empty = terrio.createVector("empty.gpkg", { schema }); // the new file's bytes
+```
+
+These are `terrio concat`, `partition`, `set-field-type`, `make-point`, `export-schema` and
+`create` (GDAL's `gdal vector` commands of the same names), in memory: `partition` returns the
+parts' relative paths and bytes, and `createVector` the bytes of the dataset, rather than
+writing files. `exportSchema` describes the layers read (GeoPackage column declarations are
+read only from files, by the command line, Python and Rust). See
+[Vector datasets](cli.md#vector-datasets) for the options and GDAL's rules.
+
+### Renaming and updating vector datasets
+
+`renameLayer(src, options)`, `editVector(src, options)` and
+`updateVector(src, dst, options)` return a new `Dataset`, preserving their inputs.
+Serialize the result with `toBytes` to persist it.
+
+```javascript
+const renamed = terrio.renameLayer(countries, {ascii: true, lowerCase: true});
+const assigned = terrio.editVector(renamed, {crs: "EPSG:4326"});
+const updated = terrio.updateVector(changes, renamed, {key: ["name"], mode: "merge"});
+```
+
+Rename accepts `inputLayer`, `outputLayer`, `ascii`, `lowerCase`,
+`filenameCompatible`, `reservedCharacters`, `replacementCharacter`, `maxLength`.
+Edit accepts `activeLayer`, `crs` (`"none"` removes it), `geometryType`, `unsetFid`.
+CRS assignment does not transform coordinates. Dataset metadata edits require the
+native path API because the memory model does not retain dataset metadata.
+Update accepts `inputLayer`, `outputLayer`, `key`, `mode` (`merge`, `update-only`,
+`append-only`); it matches feature IDs when `key` is omitted.
+
 ## Viewshed
 
 ```javascript
@@ -267,6 +305,26 @@ const height = terrio.viewshed(dem, 500000, 4400000, { om: "GROUND", cc: 0 });
 The input can be a dataset or raster bytes. `om` selects NORMAL visibility, DEM minimum
 visible elevation, or GROUND minimum height above the DEM. `cc` is 1 minus refraction.
 See [viewshed](cli.md#viewshed) for units, curvature, radius cropping and nodata behavior.
+
+## Pixel-wise operations
+
+```javascript
+const physical = terrio.unscale(packed, { ot: "Float64" });
+const rgba = terrio.nodataToAlpha(landsat, { nodata: 0 });
+const groups = terrio.reclassify(nlcd, "11=1;[21,25)=2;DEFAULT=0", { ot: "Byte" });
+const fromFile = terrio.reclassify(nlcd, "", { mappingFile: await (await fetch("map.txt")).text() });
+const pixels = terrio.asFeatures(dem, { geometryType: "polygon", includeXy: true, skipNodata: true });
+```
+
+Inputs are datasets or raster bytes; `asFeatures` returns a vector dataset (`toGeoJSON`,
+`toBytes`). WebAssembly cannot read local files, so a mapping file's text is passed as
+`mappingFile` instead of `@file`. See [unscale](cli.md#unscale),
+[nodata-to-alpha](cli.md#nodata-to-alpha), [reclassify](cli.md#reclassify) and
+[as-features](cli.md#as-features).
+
+For `nodataToAlpha`, non-finite overrides use the strings `"nan"`, `"inf"` or `"-inf"`
+(as a scalar or in the nodata array). Raw JavaScript non-finite numbers and explicit null
+are rejected before JSON serialization, so they cannot silently become a default override.
 
 ## Geolocation-array warping
 

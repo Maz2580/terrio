@@ -92,6 +92,31 @@ enum Command {
     Combine(cmd::vector_geom::CombineArgs),
     /// Sort features spatially, along a Hilbert curve or an STR tree (like gdal vector sort).
     Sort(cmd::vector_geom::SortArgs),
+    /// Concatenate vector layers and datasets into one or several layers (like gdal vector concat
+    /// and ogrmerge.py).
+    Concat(cmd::vector_dataset::ConcatArgs),
+    /// Split a vector dataset into files by field values, Hive-style or flat (like gdal vector
+    /// partition).
+    Partition(cmd::vector_dataset::PartitionArgs),
+    /// Change the type of vector fields, converting their values as GDAL does (like gdal vector
+    /// set-field-type).
+    SetFieldType(cmd::vector_dataset::SetFieldTypeArgs),
+    /// Point geometries from coordinate fields (like gdal vector make-point).
+    MakePoint(cmd::vector_dataset::MakePointArgs),
+    /// Create a vector dataset or layer from an OGR_SCHEMA, a template dataset or explicit fields
+    /// (like gdal vector create).
+    Create(cmd::vector_dataset::CreateArgs),
+    /// Print the OGR_SCHEMA JSON of a vector dataset (like gdal vector export-schema).
+    ExportSchema(cmd::vector_dataset::ExportSchemaArgs),
+    /// Rename vector layers, in place in GeoPackages or on output (like gdal vector
+    /// rename-layer).
+    RenameLayer(cmd::vector_dataset::RenameLayerArgs),
+    /// Edit the CRS, geometry type and metadata of vector layers, in place in GeoPackages or on
+    /// output (like gdal vector edit).
+    Edit(cmd::vector_dataset::EditArgs),
+    /// Update an existing vector dataset from another, matching features by FID or key fields
+    /// (like gdal vector update).
+    Update(cmd::vector_dataset::UpdateArgs),
     /// Subset, resize, rescale or change the type of a raster (like gdal_translate).
     Translate(cmd::translate::Args),
     /// Reproject and resample rasters (like gdalwarp).
@@ -116,16 +141,24 @@ enum Command {
     Overviews(cmd::overviews::Args),
     /// Edit a GeoTIFF in place: CRS, geotransform, nodata, metadata, statistics, histograms (like
     /// gdal raster edit and gdal_edit.py), or move its georeferencing to another CRS (gdalmove.py).
-    Edit(cmd::edit::Args),
+    EditRaster(cmd::edit::Args),
     /// Create a raster filled with burn values, from scratch or like a template (like gdal raster
     /// create and gdal_create).
-    Create(cmd::create::Args),
+    CreateRaster(cmd::create::Args),
     /// Write a raster into an existing GeoTIFF, reprojected to its grid (like gdal raster update).
-    Update(cmd::update::Args),
+    UpdateRaster(cmd::update::Args),
     /// Merge raster areas smaller than a threshold into their largest neighbour (like gdal_sieve.py).
     Sieve(cmd::sieve::Args),
     /// Fill raster holes by interpolation, as gdal_fillnodata.
     FillNodata(cmd::fill_nodata::Args),
+    /// Apply band scales and offsets to get physical values (like gdal raster unscale).
+    Unscale(cmd::pixel::UnscaleArgs),
+    /// Replace nodata values with an alpha band (like gdal raster nodata-to-alpha).
+    NodataToAlpha(cmd::pixel::NodataToAlphaArgs),
+    /// Map values or ranges of values to new values (like gdal raster reclassify).
+    Reclassify(cmd::pixel::ReclassifyArgs),
+    /// One vector feature per pixel, with band values as fields (like gdal raster as-features).
+    AsFeatures(cmd::pixel::AsFeaturesArgs),
     /// Focal statistics and convolution kernels over each pixel's neighbourhood (like
     /// gdal raster neighbors).
     #[command(visible_alias = "focal")]
@@ -221,6 +254,15 @@ fn run_on_this_thread(args: Vec<OsString>, terrio: Option<Vec<OsString>>) -> i32
         Command::SetGeomType(a) => cmd::vector_geom::set_geom_type(a),
         Command::Combine(a) => cmd::vector_geom::combine(a),
         Command::Sort(a) => cmd::vector_geom::sort(a),
+        Command::Concat(a) => cmd::vector_dataset::concat(a),
+        Command::Partition(a) => cmd::vector_dataset::partition(a),
+        Command::SetFieldType(a) => cmd::vector_dataset::set_field_type(a),
+        Command::MakePoint(a) => cmd::vector_dataset::make_point(a),
+        Command::Create(a) => cmd::vector_dataset::create(a),
+        Command::ExportSchema(a) => cmd::vector_dataset::export_schema(a),
+        Command::RenameLayer(a) => cmd::vector_dataset::rename_layer(a),
+        Command::Edit(a) => cmd::vector_dataset::edit(a),
+        Command::Update(a) => cmd::vector_dataset::update(a),
         Command::Translate(a) => cmd::translate::run(a),
         Command::Warp(a) => cmd::warp::run(a),
         Command::Catalog(a) => cmd::catalog::run(a),
@@ -231,11 +273,15 @@ fn run_on_this_thread(args: Vec<OsString>, terrio: Option<Vec<OsString>>) -> i32
         Command::Pansharpen(a) => cmd::pansharpen::run(a),
         Command::Viewshed(a) => cmd::viewshed::run(a),
         Command::Overviews(a) => cmd::overviews::run(a),
-        Command::Edit(a) => cmd::edit::run(a),
-        Command::Create(a) => cmd::create::run(a),
-        Command::Update(a) => cmd::update::run(a),
+        Command::EditRaster(a) => cmd::edit::run(a),
+        Command::CreateRaster(a) => cmd::create::run(a),
+        Command::UpdateRaster(a) => cmd::update::run(a),
         Command::Sieve(a) => cmd::sieve::run(a),
         Command::FillNodata(a) => cmd::fill_nodata::run(a),
+        Command::Unscale(a) => cmd::pixel::unscale(a),
+        Command::NodataToAlpha(a) => cmd::pixel::nodata_to_alpha(a),
+        Command::Reclassify(a) => cmd::pixel::reclassify(a),
+        Command::AsFeatures(a) => cmd::pixel::as_features(a),
         Command::Neighbors(a) => cmd::neighbors::run(a),
         Command::CleanCollar(a) => cmd::clean_collar::run(a, true),
         Command::Nearblack(a) => cmd::clean_collar::run(a, false),

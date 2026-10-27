@@ -3,52 +3,65 @@
 ```text
 terrio <COMMAND>
 
-  info        Summarize a raster, vector dataset or point cloud
-  convert     Convert a dataset to another format, optionally reprojecting it
-  translate   Subset, resize, rescale or change the type of a raster (like gdal_translate)
-  warp        Reproject and resample rasters (like gdalwarp)
-  catalog     Read an indexed raster mosaic from GeoPackage or FlatGeobuf footprints
-  mosaic      Mosaic rasters into one, or into a virtual raster (like gdalbuildvrt and gdal_merge)
-  rasterize   Burn vector geometries into a raster
-  polygonize  Turn a raster band into polygons of connected pixels with the same value
-  centroid    One planar centroid per feature
-  singlepart  Split multipart geometries and collections into individual features
-  vertices    Extract vertices as points with source attributes and vertex indices
-  buffer      Planar buffers with round caps and joins
-  overlay     Polygon intersection, union, difference and symmetric difference
-  dissolve    Merge polygon features, optionally grouped by attributes
-  is-valid    Report geometry validity and a reason per feature
-  make-valid  Repair invalid geometry
-  clean       Snap, deduplicate, close rings and repair geometry
-  simplify    Topology-preserving simplification (like gdal vector simplify)
-  segmentize  Limit segment lengths by adding vertices (like gdal vector segmentize)
-  convex-hull Convex hull per feature (like gdal vector convex-hull)
-  concave-hull Concave hull per feature (like gdal vector concave-hull)
-  swap-xy     Swap X and Y coordinates (like gdal vector swap-xy)
-  set-geom-type Change geometry types and dimensions (like gdal vector set-geom-type)
-  combine     Collect geometries into collections by groups (like gdal vector combine)
-  sort        Spatial sort along a Hilbert curve or an STR tree (like gdal vector sort)
-  footprint   Exact valid-data footprint of a raster
-  sample      Sample multiple raster bands at vector points
-  contour     Contour lines at interval or fixed elevation levels
-  zonal-stats Per-polygon statistics across multiple raster bands
-  sql         Read-only SELECT queries over vector layers
-  dem         Terrain analysis: hillshade, slope, aspect, color relief, TRI, TPI, roughness (like gdaldem)
-  calc        Raster algebra: band math in NumPy syntax over one or more rasters (like gdal_calc.py)
-  proximity   Distance from every pixel to the nearest target pixel (like gdal_proximity.py)
-  pansharpen  Weighted Brovey pansharpening of panchromatic and spectral bands
+  info            Summarize a raster, vector dataset or point cloud
+  convert         Convert a dataset to another format, optionally reprojecting it
+  concat          Concatenate vector layers and datasets (like gdal vector concat and ogrmerge.py)
+  partition       Split a vector dataset into files by field values (like gdal vector partition)
+  set-field-type  Change field types with GDAL's value conversions (like gdal vector set-field-type)
+  make-point      Point geometries from coordinate fields (like gdal vector make-point)
+  create          Create a vector dataset from a schema or template (like gdal vector create)
+  export-schema   Print a vector dataset's OGR_SCHEMA JSON (like gdal vector export-schema)
+  rename-layer    Rename vector layers or normalize their names (like gdal vector rename-layer)
+  edit            Assign vector CRS, geometry declarations or metadata (like gdal vector edit)
+  update          Update or append vector features by key or FID (like gdal vector update)
+  translate       Subset, resize, rescale or change the type of a raster (like gdal_translate)
+  warp            Reproject and resample rasters (like gdalwarp)
+  catalog         Read an indexed raster mosaic from GeoPackage or FlatGeobuf footprints
+  mosaic          Mosaic rasters into one, or into a virtual raster (like gdalbuildvrt and gdal_merge)
+  rasterize       Burn vector geometries into a raster
+  polygonize      Turn a raster band into polygons of connected pixels with the same value
+  centroid        One planar centroid per feature
+  singlepart      Split multipart geometries and collections into individual features
+  vertices        Extract vertices as points with source attributes and vertex indices
+  buffer          Planar buffers with round caps and joins
+  overlay         Polygon intersection, union, difference and symmetric difference
+  dissolve        Merge polygon features, optionally grouped by attributes
+  is-valid        Report geometry validity and a reason per feature
+  make-valid      Repair invalid geometry
+  clean           Snap, deduplicate, close rings and repair geometry
+  simplify        Topology-preserving simplification (like gdal vector simplify)
+  segmentize      Limit segment lengths by adding vertices (like gdal vector segmentize)
+  convex-hull     Convex hull per feature (like gdal vector convex-hull)
+  concave-hull    Concave hull per feature (like gdal vector concave-hull)
+  swap-xy         Swap X and Y coordinates (like gdal vector swap-xy)
+  set-geom-type   Change geometry types and dimensions (like gdal vector set-geom-type)
+  combine         Collect geometries into collections by groups (like gdal vector combine)
+  sort            Spatial sort along a Hilbert curve or an STR tree (like gdal vector sort)
+  footprint       Exact valid-data footprint of a raster
+  sample          Sample multiple raster bands at vector points
+  contour         Contour lines at interval or fixed elevation levels
+  zonal-stats     Per-polygon statistics across multiple raster bands
+  sql             Read-only SELECT queries over vector layers
+  dem             Terrain analysis: hillshade, slope, aspect, color relief, TRI, TPI, roughness (like gdaldem)
+  calc            Raster algebra: band math in NumPy syntax over one or more rasters (like gdal_calc.py)
+  proximity       Distance from every pixel to the nearest target pixel (like gdal_proximity.py)
+  pansharpen      Weighted Brovey pansharpening of panchromatic and spectral bands
 
-  viewshed    Single-observer visibility or minimum visible height (like gdal_viewshed)
-  sieve       Merge raster areas smaller than a threshold into their largest neighbour (like gdal_sieve.py)
-  neighbors   Focal statistics and convolution kernels (like gdal raster neighbors)
-  clean-collar Set noisy nearly black/white collars to exact black/white (like gdal raster clean-collar)
-  nearblack   The same, with nearblack's two-pass defaults (like nearblack)
-  enhance     Contrast enhancement by lookup tables: equalization and LUT files (like gdalenhance)
-  crs         Describe a coordinate reference system, or transform coordinates between two
-  formats     List the formats terrio reads and writes
-  grid        Grid a point cloud into a raster (like PDAL's writers.gdal)
-  filter      PDAL's point cloud filters (smrf, pmf, csf, elm, hag_nn, crop, expression...)
-  mcp         Serve these commands to AI agents over the Model Context Protocol
+  viewshed        Single-observer visibility or minimum visible height (like gdal_viewshed)
+  sieve           Merge raster areas smaller than a threshold into their largest neighbour (like gdal_sieve.py)
+  unscale         Apply band scales and offsets to get physical values (like gdal raster unscale)
+  nodata-to-alpha Replace nodata values with an alpha band (like gdal raster nodata-to-alpha)
+  reclassify      Map values or ranges of values to new values (like gdal raster reclassify)
+  as-features     One vector feature per pixel, with band values as fields (like gdal raster as-features)
+  neighbors       Focal statistics and convolution kernels (like gdal raster neighbors)
+  clean-collar    Set noisy nearly black/white collars to exact black/white (like gdal raster clean-collar)
+  nearblack       The same, with nearblack's two-pass defaults (like nearblack)
+  enhance         Contrast enhancement by lookup tables: equalization and LUT files (like gdalenhance)
+  crs             Describe a coordinate reference system, or transform coordinates between two
+  formats         List the formats terrio reads and writes
+  grid            Grid a point cloud into a raster (like PDAL's writers.gdal)
+  filter          PDAL's point cloud filters (smrf, pmf, csf, elm, hag_nn, crop, expression...)
+  mcp             Serve these commands to AI agents over the Model Context Protocol
 ```
 
 Install it with `curl -LsSf https://terrio.opengeos.org/install.sh | sh` (on Windows,
@@ -400,6 +413,213 @@ String predicates (comparisons, `IN` and `BETWEEN`) now ignore ASCII case to mat
 current OGRSQL; `ORDER BY` and `MIN`/`MAX` retain case-sensitive ordering.
 Output field names must be unique, ignoring case. The `convert --sql` path retains its legacy
 single-layer fallback for `FROM` and allows duplicate output field names.
+
+## Vector datasets
+
+These commands are GDAL 3.13's `gdal vector concat`, `partition`, `set-field-type`,
+`make-point`, `create`, `export-schema`, `rename-layer`, `edit` and `update`. Their results are compared with GDAL in the
+`vector-dataset` conformance suite (see [Testing](testing.md)).
+
+### concat
+
+```sh
+terrio concat countries.gpkg us_counties.gpkg merged.gpkg                  # one layer per layer name
+terrio concat a.shp b.shp c.shp all.gpkg --mode single --source-layer-field-name source
+terrio concat *.gpkg stacked.gpkg --mode stack --output-layer "{DS_BASENAME}_{LAYER_NAME}"
+terrio concat a.gpkg b.geojson out.gpkg --mode single --field-strategy intersection --dst-crs EPSG:3857
+```
+
+`--mode merge-per-layer-name` (the default) makes one output layer per distinct layer name,
+`stack` one per input layer (named by the `--output-layer` template, `{AUTO_NAME}` by
+default: `{DS_BASENAME}_{LAYER_NAME}`, or the layer name when both are the same), and
+`single` one layer (`merged` by default). Templates also take `{DS_NAME}`, `{DS_INDEX}` and
+`{LAYER_INDEX}` (from 0). Output layers are ordered by name, as GDAL orders them.
+The generated source-layer field must have an unused name; collisions with source fields
+are rejected before creating an output (GDAL's writer may instead rename a colliding field).
+`--field-strategy union` (the default) keeps every field, matched by exact name;
+`intersection` the fields every layer has, ignoring case. Fields of the same name merge into a
+type holding both (reals over integers, 64-bit over 32-bit integers, strings otherwise).
+Union fields such as `Name` and `name` remain distinct; formats requiring case-insensitive
+unique column names may reject that schema (GDAL may rename columns when writing).
+`--source-layer-field-name`/`--source-layer-field-content` add a first field naming each
+feature's source (`source_ds_lyr` and `{AUTO_NAME}` by default). Each output layer has the
+geometry type and CRS of its first source layer; features of layers in another CRS are
+reprojected to it, or to `--dst-crs`. `-s/--src-crs` overrides the inputs' CRS. `-l` selects
+input layers; `--append`/`--overwrite` update an existing GeoPackage as elsewhere. GDAL's
+`--upsert`, `--skip-errors`, `--if`, `--oo`, `--co` and `--lco` are not supported.
+
+### partition
+
+```sh
+terrio partition counties.gpkg out --field STATE                         # out/counties/STATE=TN/part_0000000001.gpkg
+terrio partition places.shp out --field country --field city --feature-limit 1000 -f GPKG
+terrio partition places.shp flat --field featurecla --scheme flat --pattern "{FIELD_VALUE}_%03d" -f FlatGeobuf
+terrio partition big.parquet out --max-file-size 500MB                     # parts of an estimated size
+```
+
+`--scheme hive` (the default) writes `layer/field=value/.../part_%010d.ext` directories, with
+null values as `__HIVE_DEFAULT_PARTITION__`; `flat` writes the files in the output directory,
+named `{LAYER_NAME}_{FIELD_VALUE}_%010d` (several values joined by `_`, nulls as `__NULL__`,
+empty strings as `__EMPTY__`). `--pattern` sets the name, with `{LAYER_NAME}`, `{FIELD_VALUE}`
+and one `%d`, `%5d` or `%05d` part number. Names and values are percent-encoded as GDAL encodes
+them. Fields must be String or Integer fields; `OGR_GEOMETRY` partitions on the geometry type
+(as GDAL 3.13 does). `--feature-limit` and `--max-file-size` split partitions into numbered
+parts; the size estimate begins at 64 KiB plus the bytes each feature adds, and the minimum
+size limit is 1 MiB. Without `--field`, they split the layer alone (GDAL 3.13). `--omit-partitioned-field` leaves the partitioning fields out
+(automatic for Hive GeoParquet). The format defaults to the input's; files take GDAL's
+extension of the format (`.json` for GeoJSON). An existing output is refused unless
+`--overwrite` (only when it looks like a partitioned dataset) or `--append` (new parts are
+numbered after the existing ones; GDAL also fills the last existing part while it is below the
+limits) is given. GDAL's `--skip-errors`, `--co` and `--lco` are not supported, nor GDAL's
+Parquet `_metadata` file.
+
+Partition output directories carry a `.terrio-partition` ownership marker. Overwrite
+validates options and every descendant entry before removal, refuses a directory containing
+the path input, and requires a matching marker; unmarked directories must be removed
+explicitly. Flat output accepts only the selected format's files and sidecars. Empty and
+dot-only names are escaped. The Rust `partition_to_dir` API receives materialized layers,
+so callers must keep any source files outside an overwrite target; path-based CLI/Python
+calls check that relation. Partition and concat currently materialize feature copies;
+large datasets can require roughly input plus output memory.
+
+### set-field-type
+
+```sh
+terrio set-field-type countries.gpkg out.gpkg --field-name POP_EST --dst-field-type Integer64
+terrio set-field-type countries.gpkg out.gpkg --src-field-type Real --dst-field-type String
+terrio set-field-type places.csv out.gpkg --field-name visited --dst-field-type Date --active-layer places
+```
+
+`--dst-field-type` (alias `--field-type`) is a type (`Integer`, `Integer64`, `Real`,
+`String`, `Date`, `Time`, `DateTime`, `Binary`) or a subtype (`Boolean`, `Int16`, `Float32`,
+`JSON`, `UUID`) implying its type; `--field-name` names the field, or `--src-field-type` changes
+every field of a type. Values are converted as GDAL converts them: strings by their numeric
+prefix (`"12abc"` is 12, `"abc"` 0, with warnings), reals truncated and clamped to 32 or 64
+bits, 64-bit integers clamped to 32 bits, booleans from `true`/`yes`/`on`/numbers, dates and
+date-times reformatted (dates become `YYYY/MM/DD` strings), text parsed as dates or times.
+Features whose value cannot be converted (a date or blob to a number, a date to a blob) are left
+out, with a warning, as in GDAL. Widths and precisions are kept. terrio's data model has no
+separate Int16, Float32 or UUID storage: Int16 values are clamped to 16 bits in 64-bit
+integers, Float32 values are doubles, UUIDs text, times text (`HH:MM:SS[.sss]`), and an
+Integer field changed to Boolean holds 0 or 1 where GDAL keeps the integer. List types are not
+supported.
+
+Numeric-prefix conversion of unusually long text values currently involves repeated parsing
+and can be expensive.
+
+### make-point
+
+```sh
+terrio make-point trace.csv points.gpkg --x longitude --y latitude --dst-crs EPSG:4326
+terrio make-point stations.gpkg points.gpkg --x easting --y northing --z elevation -l stations
+```
+
+Replaces the geometries of the first layer (or `-l`) with points read from numeric or text
+fields (text must hold a number, surrounding spaces allowed; null numbers are 0, as in GDAL),
+keeping every field. `--z` and `--m` add Z and M. `--dst-crs` assigns a CRS without
+reprojecting; without it the points have none, as in GDAL. Unlike GDAL, Integer64 fields are
+accepted. terrio's GeoPackage writer writes XY and XYZ geometries, so M values are kept in
+memory (Rust, Python and JavaScript) but not in GeoPackages.
+
+Text coordinates accept NaN and infinity as GDAL 3.13.3 does; use finite coordinates for
+valid extents and spatial indexes. GDAL can report an extent-update error for infinite
+GeoPackage coordinates even while its command exits successfully.
+
+### create
+
+```sh
+terrio create sites.gpkg --output-layer sites --geometry-type POINT --crs EPSG:4326 \
+  --field "name:STRING(80)" --field visits:INTEGER --field total:INTEGER64 --fid site_id
+terrio create empty.gpkg --like countries.gpkg --layer countries --output-layer countries_new
+terrio create copy.gpkg --schema countries.schema.json
+terrio create sites.gpkg --update --output-layer more --geometry-type LINESTRING --crs EPSG:4326
+```
+
+Creates a dataset of empty layers from an `OGR_SCHEMA` document (`--schema`, a file or JSON
+text, such as `terrio export-schema` writes), from the layers of a template dataset
+(`--like`, `-l` choosing layers), or from `--geometry-type`, `--crs`, `--field
+NAME:TYPE[(WIDTH[,PRECISION])]` and `--fid`. `--output-layer` names a single layer.
+`--update` adds the layers to an existing GeoPackage (a layer of the same name is refused);
+`--overwrite` replaces an existing dataset. `--fid` names the FID column of new GeoPackages.
+Field types are mapped onto terrio's (see set-field-type); 32-bit `INTEGER(10)` fields keep no
+width of 10 or more, which marks 64-bit integers. Z and M suffixes of geometry types are
+accepted but not recorded in empty layers (a warning says so). Curve, surface, TIN and list
+types, `--geometry-field` and GDAL's `--oo` are not supported.
+
+Vector schema/template creation orders fields by name, matching GDAL 3.13; explicit
+`--field` arguments keep their order.
+
+### export-schema
+
+```sh
+terrio export-schema countries.gpkg
+terrio export-schema natural_earth.gpkg --layer ne_50m_admin_0_countries -o countries.json
+```
+
+Prints the dataset's `OGR_SCHEMA` (GDAL's `ogr/data/ogr_fields_override.schema.json`), as
+`gdal vector export-schema` does: per layer its name, `"schemaType": "Full"`, geometry fields
+(name, camel-case type with `Z`/`M`, nullability, `coordinateSystem` as `{"authid":
+"EPSG:4326"}`, or `{"wkt": ...}` without an authority code, `null` without a CRS), the FID
+column and the fields (name, type, subtype, width, precision, nullability, unique constraint,
+default). Local GeoPackages are described from their table declarations (exact column types,
+`NOT NULL`, `UNIQUE` and defaults); other formats from the layers read (integer fields are
+`Integer64` when 10 or more digits wide or holding 64-bit values, as GDAL's DBF reader and
+GeoJSON reader type them).
+
+### rename-layer
+
+```sh
+terrio rename-layer data.gpkg --input-layer roads --output-layer transport
+terrio rename-layer source.gpkg renamed.gpkg --ascii --lower-case
+```
+
+Renames a chosen layer or normalizes every layer name. `--ascii`, `--lower-case`,
+`--filename-compatible`, `--reserved-characters`, `--replacement-character` and
+`--max-length` control normalization; colliding results receive unique suffixes.
+A selected rename retains the other input layers; name collisions are rejected clearly.
+GDAL's CLI `--input-layer` selection can instead produce only the selected layer.
+Without an output, local GeoPackages are changed in place, including their indexes,
+triggers and metadata references. Other formats require an output.
+
+### edit
+
+```sh
+terrio edit data.gpkg --crs EPSG:4326 --metadata SOURCE=survey
+terrio edit data.gpkg edited.gpkg --active-layer roads --geometry-type LINESTRING
+```
+
+Assigns CRS without reprojecting, changes declared geometry type (including Z/M), or
+sets/removes dataset and layer metadata. Metadata edits and Z/M declarations require
+GeoPackage outputs; other output formats reject those options. `--active-layer` selects one
+layer, matching exact names first and otherwise ignoring ASCII case. Default CRS and
+geometry edits skip attribute-only tables. `--crs none` removes a CRS. `--unset-fid`
+requires an output. Geometries are not converted by a declaration change. An output copy
+retains default-domain GeoPackage metadata; named domains are not copied, matching GDAL 3.13.3.
+
+In-place GeoPackage edits materialize the database and replace it with a unique temporary
+file beside the resolved input. Mode bits and symlink targets are preserved; hard links
+are detached, and ownership, ACLs and extended attributes are not preserved. Exclude
+concurrent writers: journal/WAL checks are not transaction locks. Atomic replacement
+is not a power-loss durability guarantee. Output creation and metadata application are
+separate steps, so a failed output edit can leave a file.
+
+### update
+
+```sh
+terrio update incoming.gpkg existing.gpkg --key code --mode merge
+```
+
+Matches features by FID, or by repeated `--key` fields of matching types. `--input-layer`
+and `--output-layer` select layers. `merge` updates matched features and appends unmatched
+ones; `update-only` and `append-only` restrict that behavior. NULL keys match nothing, so
+merge and append-only append them, while update-only skips them. A key matching several
+output features matches none. Shared fields and geometry are updated without reprojection;
+output-only fields are retained and input-only fields are not added.
+
+GeoPackages use the in-place mechanism above. Other formats stage new files then replace
+the originals. Multi-file replacements are not atomic across sidecars and a failure may
+leave a partial replacement. Successful Shapefile replacements remove obsolete QIX/SBN/SBX
+indexes and optional PRJ/CPG sidecars not produced by the new write.
 
 ## info
 
@@ -922,6 +1142,89 @@ For nearest interpolation, GDAL's search fringe can write zero where the closest
 quadrant candidate is less than one pixel beyond the distance limit; Terrio follows
 that behavior. Complex bands are unsupported. Standard raster output
 options (`--format`, `--compress`, `--co`, etc.) apply.
+
+## unscale
+
+```sh
+terrio unscale packed.tif physical.tif
+terrio unscale packed.tif physical.tif --ot Float64
+```
+
+As `gdal raster unscale` (`gdal_translate -unscale`): each band becomes `value * scale +
+offset` with its own scale and offset (GeoTIFF band scales and offsets, netCDF `scale_factor`
+and `add_offset`; bands without them are converted unchanged). `--ot` is the output type,
+Float32 by default (Float64 for Float64 inputs). Nodata pixels keep the band's nodata value,
+which the output declares unchanged, and the output has no scale or offset. Values are computed
+and rounded as GDAL's virtual rasters compute them: working pixels are Float32 unless the input
+or output is a 32- or 64-bit integer, or the output is Float64. A Float64 input with
+`--ot Float32`, Byte or Int16 still uses Float32 working pixels, matching GDAL 3.13.3.
+Byte outputs round half up. Complex bands are not
+supported. As in GDAL 3.13.3, if the output type cannot represent the original nodata
+value, pixels are clamped to that type while the original nodata declaration is retained
+(for example, nodata -9999 becomes a zero pixel in Byte output, still tagged -9999).
+Choose an output type that can hold the nodata value when those pixels must remain invalid.
+The standard raster output options apply.
+
+## nodata-to-alpha
+
+```sh
+terrio nodata-to-alpha landsat.tif landsat_rgba.tif
+terrio nodata-to-alpha image.tif out.tif --nodata 0 --nodata 0 --nodata 0
+```
+
+As `gdal raster nodata-to-alpha`: the bands are copied without nodata values and followed by an
+alpha band of their type, 0 where the first band's mask is 0 and 255 elsewhere (Int8 alpha
+saturates at 127, as GDAL converts it). The mask is the first band's nodata value; one
+`--nodata` overrides the value used for the first-band mask; other bands do not
+participate in that mask. One `--nodata` per band (`nan`, `inf` and `-inf`
+are accepted) makes a pixel transparent only where every band has its value, as GDAL's
+`NODATA_VALUES`. Without explicit `--nodata`, a raster whose first band has no nodata
+value, or that already ends with an alpha band (two or four bands), is copied unchanged.
+Explicit nodata adds a new alpha band even to RGBA input, matching GDAL 3.13.3. Copied
+bands retain their scales and offsets, including driver-recorded packing. Internal and `.msk`
+masks are not used.
+The result is an owned raster held in memory. An unchanged result also clones the input's
+pixel buffer; this path does not stream file conversion.
+
+## reclassify
+
+```sh
+terrio reclassify nlcd.tif groups.tif -m "11=1;[21,25)=2;[41,44)=4;DEFAULT=0"
+terrio reclassify dem.tif zones.tif -m "NO_DATA=0;[0,1500)=1;[1500,inf)=2" --ot Byte
+terrio reclassify nlcd.tif groups.tif -m @mapping.txt
+```
+
+As `gdal raster reclassify`, with GDAL's mapping syntax: `from=to` entries separated by `;`.
+`from` is a value, an interval (`[a,b)`, `(a,b]`, `(-inf,b]`, `[a,inf)`...), `NO_DATA` (the
+band's nodata value), `NAN` or `DEFAULT` (any other value); `to` is a value, `NO_DATA` or
+`PASS_THROUGH` (the value unchanged). Intervals must not overlap. `@file` reads one entry per
+line; leading spaces and `#` comments are removed. A value that no entry maps, or an output value
+the output type cannot represent exactly, is an error. `--ot` is the output type (by default the
+input's). The output keeps each band's nodata value; like GDAL's, it has no color table, band
+descriptions or scales. Like GDAL 3.13.3, `NO_DATA` intervals with NaN nodata
+can fail overlap validation and do not match NaN pixels: `NO_DATA=0;DEFAULT=PASS_THROUGH`
+leaves NaN unchanged. Use `NAN` as the source mapping key for NaN pixels.
+As with `unscale`, retained nodata pixels are clamped when the output type cannot hold
+the original nodata declaration; choose a suitable output type to preserve their validity.
+
+## as-features
+
+```sh
+terrio as-features dem.tif pixels.gpkg --geometry-type polygon --include-xy --include-row-col
+terrio as-features landsat.tif pixels.csv --skip-nodata -b 3 -b 2
+```
+
+As `gdal raster as-features`: one feature per pixel, row by row, in a layer named `pixels`
+(`--output-layer`). Fields: `CENTER_X` and `CENTER_Y` (pixel centres, `--include-xy`), `ROW`
+and `COL` (`--include-row-col`), then `BAND_<n>` (Float) per band. `--geometry-type` is `none`
+(an attribute table, the default), `point` (pixel centres) or `polygon` (pixel squares, in the
+raster's CRS). `--skip-nodata` leaves out the pixels whose first reported band has its nodata
+value after conversion to the source type; nearby Float32 values remain valid. Repeated band
+selections are reported once, in their first-selected order. `-b` selects bands (GDAL 3.13.3 accepts `-b` but reports every band). `--append`
+and `--overwrite` update an existing output, as for `polygonize`. The features are built in
+memory; an estimated expansion above 512 MiB is refused before generating features.
+Crop large inputs first. GDAL's `--update`, `--overwrite-layer` and
+layer creation options are not supported.
 
 ## Native multidimensional arrays
 

@@ -1220,6 +1220,89 @@ test("SQL computed columns, DISTINCT and summary aggregates", () => {
   assert.equal(terrio.sql(src, "SELECT DISTINCT v FROM layer").toGeoJSON().features.length, 2);
 });
 
+test("vector dataset commands: concat, partition, setFieldType, makePoint, schemas", () => {
+  const places = (name) => ({ type: "FeatureCollection", name, features: [["TN", 1, "-86.5"], ["NY", 2, "-74"], ["TN", 3, "x"]].map(
+    ([state, n, lon], i) => ({ type: "Feature", geometry: { type: "Point", coordinates: [i, i] }, properties: { state, n, lon, lat: 36 } }),
+  ) });
+  const a = terrio.fromGeoJSON(places("a"), "a");
+  const merged = terrio.concat([a, { bytes: a.toBytes("b.gpkg"), filename: "b.gpkg" }], { mode: "single", sourceLayerFieldName: "src" });
+  assert.deepEqual(merged.layerNames(), ["merged"]);
+  const features = merged.toGeoJSON().features;
+  assert.equal(features.length, 6);
+  assert.equal(features[5].properties.src, "b_a"); // {AUTO_NAME}: the file and layer names
+  assert.throws(() => terrio.concat([a], { outputLayer: "x" }), /merge-per-layer-name/);
+  assert.throws(() => terrio.concat([a], { mode: "single", sourceLayerFieldName: "state" }), /source-layer field.*already exists/);
+
+  const parts = terrio.partition(a, { fields: ["state"], format: "GeoJSON" });
+  assert.deepEqual(parts.map((p) => p.path), ["a/state=TN/part_0000000001.json", "a/state=NY/part_0000000001.json"]);
+  assert.equal(terrio.open(parts[0].bytes, "p.json").toGeoJSON().features.length, 2);
+
+  const typed = terrio.setFieldType(a, "String", { fieldName: "n" }).toGeoJSON();
+  assert.equal(typed.features[2].properties.n, "3");
+  assert.throws(() => terrio.setFieldType(a, "Real", { fieldName: "nope" }), /cannot find field/);
+
+  const two = terrio.fromGeoJSON({ type: "FeatureCollection", features: places("a").features.slice(0, 2) });
+  const pts = terrio.makePoint(two, "lon", "lat", { crs: "EPSG:4326" }).toGeoJSON();
+  assert.deepEqual(pts.features[1].geometry.coordinates, [-74, 36]);
+  assert.throws(() => terrio.makePoint(a, "lon", "lat"), /invalid value/);
+
+  const bytes = terrio.createVector("new.gpkg", { outputLayer: "sites", geometryType: "POINT", crs: "EPSG:32633", fields: ["name:STRING(20)", "total:INTEGER64"] });
+  const schema = terrio.exportSchema({ bytes, filename: "new.gpkg" });
+  assert.equal(schema.layers[0].name, "sites");
+  assert.equal(schema.layers[0].geometryFields[0].type, "Point");
+  assert.deepEqual(schema.layers[0].geometryFields[0].coordinateSystem, { authid: "EPSG:32633" });
+  assert.deepEqual(schema.layers[0].fields.map((f) => f.type), ["String", "Integer64"]);
+  const copy = terrio.createVector("copy.gpkg", { schema });
+  assert.deepEqual(terrio.exportSchema({ bytes: copy, filename: "copy.gpkg" }), schema);
+  for (const base of [{ schema }, { like: a }]) {
+    for (const explicit of [{ fields: [] }, { geometryType: "POINT" }, { crs: "EPSG:4326" }, { fid: "rowid" }]) {
+      assert.throws(() => terrio.createVector("invalid.gpkg", { ...base, ...explicit }), /give one of schema, like, or explicit fields/);
+    }
+  }
+  a.free(); merged.free();
+});
+
+test("unscale, nodataToAlpha, reclassify and asFeatures", () => {
+  const gt = [100, 10, 0, 50, 0, -10];
+  const src = terrio.rasterFromArray(new Uint8Array([1, 2, 255, 40]), 2, 2, gt, "EPSG:32611", 255);
+  const alpha = terrio.nodataToAlpha(src);
+  assert.equal(alpha.count, 2);
+  assert.deepEqual([...alpha.readBand(2)], [255, 255, 0, 255]);
+  assert.deepEqual([...terrio.nodataToAlpha(src, null).readBand(2)], [255, 255, 0, 255]);
+  assert.deepEqual([...terrio.nodataToAlpha(src, { nodata: 1 }).readBand(2)], [0, 255, 255, 255]);
+  assert.throws(() => terrio.nodataToAlpha(src, { nodata: NaN }), /strings/);
+  assert.throws(() => terrio.nodataToAlpha(src, { nodata: Infinity }), /strings/);
+  assert.throws(() => terrio.nodataToAlpha(src, { nodata: null }), /null/);
+  assert.throws(() => terrio.nodataToAlpha(src, { nodata: [NaN] }), /strings/);
+  const special = terrio.rasterFromArray(new Float64Array([NaN, Infinity, -Infinity, 3]), 2, 2, gt);
+  for (const [nodata, expected] of [["nan", [0, 255, 255, 255]], ["inf", [255, 0, 255, 255]], ["-inf", [255, 255, 0, 255]]]) {
+    assert.deepEqual([...terrio.nodataToAlpha(special, { nodata }).readBand(2)], expected);
+  }
+  const fractional = terrio.rasterFromArray(new Float32Array([0.1, 0.2]), 2, 1, gt, "EPSG:32611", 0.1);
+  assert.equal(terrio.asFeatures(fractional, { skipNodata: true }).toGeoJSON().features.length, 1);
+  assert.deepEqual(Object.keys(terrio.asFeatures(src, { bands: [1, 1] }).toGeoJSON().features[0].properties), ["BAND_1"]);
+  const rc = terrio.reclassify(src, "[0,3)=1;[3,50]=2;NO_DATA=NO_DATA");
+  assert.deepEqual([...rc.readBand(1)], [1, 1, 255, 2]);
+  const fromFile = terrio.reclassify(src, "", { mappingFile: "# c\n[0,3)=7\nDEFAULT=PASS_THROUGH\n", ot: "Int16" });
+  assert.equal(fromFile.dtype, "int16");
+  assert.deepEqual([...fromFile.readBand(1)], [7, 7, 255, 40]);
+  assert.throws(() => terrio.reclassify(src, "1=2"), /no specified mapping/);
+  assert.throws(() => terrio.reclassify(src, "@map.txt"), /mappingFile/);
+  const nanSource = terrio.rasterFromArray(new Float32Array([NaN, 1]), 2, 1,
+    [0, 1, 0, 1, 0, -1], "EPSG:32610", NaN);
+  const intervals = Array.from({length: 81}, (_, i) => (i * 37) % 81)
+    .map(i => i === 80 ? "NO_DATA=0" : `${i}=${i}`).join(";");
+  assert.throws(() => terrio.reclassify(nanSource, intervals), /overlaps/);
+  assert.throws(() => terrio.reclassify(src, "1=2", {mappingFile: "1=3"}), /not both/);
+  const scaled = terrio.unscale(src.toBytes("s.tif"), { ot: "Float64" });
+  assert.equal(scaled.dtype, "float64");
+  const fc = terrio.asFeatures(src, { geometryType: "polygon", skipNodata: true, includeRowCol: true }).toGeoJSON();
+  assert.equal(fc.features.length, 3);
+  assert.deepEqual(fc.features[2].properties, { ROW: 1, COL: 1, BAND_1: 40 });
+  assert.deepEqual(fc.features[0].geometry.coordinates[0][1], [100, 40]);
+  assert.throws(() => terrio.asFeatures(src, { geometryType: "line" }), /geometry type/);
+});
+
 test("viewshed visibility, height and byte input", () => {
   const dem = terrio.rasterFromArray(new Float64Array([0, 0, 10, 0, 0]), 5, 1, [0, 10, 0, 10, 0, -10], "EPSG:32611");
   assert.deepEqual([...terrio.viewshed(dem, 5, 5, { cc: 0 }).readBand(1)], [255, 255, 255, 0, 0]);
@@ -1665,4 +1748,19 @@ test("promoteTo3d applies to vector toBytes and preserves 2D geometry", () => {
 test("unterminated quoted PROJ values raise an error", () => {
   assert.throws(() => terrio.transformPoints([10], [40], "EPSG:4326",
     '+proj=tmerc +datum=WGS84 +title="abc +k=0.9996'), /unterminated quoted PROJ value/);
+});
+
+
+test("vector dataset commands: rename, edit and key update preserve source datasets", () => {
+  const geo = (rows) => ({ type: "FeatureCollection", features: rows.map(([name, n], i) => ({ type: "Feature", properties: {name, n}, geometry: {type: "Point", coordinates: [i, i]} })) });
+  const original = terrio.concat([geo([["x", 1], ["y", 2]])], {mode: "single", outputLayer: "Café"});
+  const renamed = terrio.renameLayer(original, {ascii: true, lowerCase: true});
+  assert.equal(terrio.exportSchema(renamed).layers[0].name, "cafe");
+  assert.equal(terrio.exportSchema(original).layers[0].name, "Café");
+  const edited = terrio.editVector(renamed, {crs: "EPSG:3857"});
+  assert.equal(terrio.exportSchema(edited).layers[0].geometryFields[0].coordinateSystem.authid, "EPSG:3857");
+  const updated = terrio.updateVector(geo([["x", 9], ["z", 3]]), renamed, {key: ["name"]});
+  assert.equal(updated.info().layers[0].feature_count, 3);
+  assert.equal(renamed.info().layers[0].feature_count, 2);
+  assert.throws(() => terrio.editVector(original, {metadata: ["A=B"]}), /unknown field/);
 });
