@@ -78,7 +78,8 @@ the same way (JPEG XL files themselves are not a format terrio reads).
 Raw-layout rasters (SRTM HGT tiles, EHdr, ENVI, SAGA, ERS, Idrisi and Surfer 6 binary grids) are
 read in place, as GDAL's raw drivers read them: opening reads the header (for SRTM tiles, only the
 file's name and size), and a window reads each row it covers at its offset in the data file, of
-the bands asked for. `terrio info` reads no pixels (statistics are computed a strip of rows at a
+the bands asked for (pixel-interleaved files, BIP and Idrisi RGB, store the bands of a row
+together: a window of one band reads the row's samples of every band). `terrio info` reads no pixels (statistics are computed a strip of rows at a
 time), and `terrio convert` to a GeoTIFF or COG writes them a strip at a time. Remote SRTM tiles
 (HTTP(S) and `s3://`) are read with range requests; remote rasters of the other raw formats, and
 zipped tiles, are downloaded whole. A 512 x 512 window of a 0.5" tile (103.7 MB) reads 524,288

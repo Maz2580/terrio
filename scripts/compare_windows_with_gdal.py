@@ -214,8 +214,10 @@ def level_windows(w, h):
 
 
 # The raw-layout rasters of the test data, read by window row by row. `.img` files are ENVI data
-# files when an ENVI `.hdr` is next to them (they are ERDAS Imagine files otherwise).
-RAW_EXTENSIONS = (".hgt", ".bil", ".flt", ".envi", ".sdat", ".ers", ".rst", ".grd")
+# files when an ENVI `.hdr` is next to them (they are ERDAS Imagine files otherwise); `.grd` files
+# are Surfer 6 binary grids when they start with `DSBB` (Surfer's text and Surfer 7 grids are read
+# whole).
+RAW_EXTENSIONS = (".hgt", ".bil", ".flt", ".envi", ".sdat", ".ers", ".rst")
 
 
 def is_raw(data_dir, name):
@@ -230,8 +232,14 @@ def is_raw(data_dir, name):
     """
     if name.endswith(RAW_EXTENSIONS):
         return True
+    if name.endswith(".grd"):
+        with open(os.path.join(data_dir, name), "rb") as f:
+            return f.read(4) == b"DSBB"
     hdr = os.path.join(data_dir, os.path.splitext(name)[0] + ".hdr")
-    return name.endswith(".img") and os.path.isfile(hdr) and open(hdr, "rb").read(4) == b"ENVI"
+    if not (name.endswith(".img") and os.path.isfile(hdr)):
+        return False
+    with open(hdr, "rb") as f:
+        return f.read(4) == b"ENVI"
 
 
 def compare_local(data_dir):

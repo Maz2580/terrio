@@ -138,10 +138,7 @@ fn raw_opener(path: &str) -> Option<RawOpener> {
     if hgt::is_hgt(p) {
         return Some(hgt::open);
     }
-    #[cfg(feature = "grib")]
-    if matches!(by_extension, None | Some(RasterDriver::GRIB)) && grib::is_grib_file(p) {
-        return None;
-    }
+    // GRIB files, which `read_own` sniffs next, have none of these extensions.
     match by_extension? {
         RasterDriver::ERS => Some(ers::open),
         RasterDriver::SAGA => Some(saga::open),
