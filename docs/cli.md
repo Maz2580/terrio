@@ -1828,7 +1828,9 @@ on stderr and in MCP tool result text. Heights follow GDAL too: between CRSs wit
 heights, keeping a vertical CRS's heights as they are (PROJ's ballpark vertical
 transformation) fails with `ALLOW_BALLPARK=NO`, and with `ONLY_BEST=YES` when a
 geoid model or vertical transformation exists but does not apply (its grid is
-missing, or the point is outside it).
+missing, or the point is outside it). With default options, heights kept because a
+geoid model covering the point needs a missing grid are reported by a warning, as a
+missing horizontal grid is.
 `PROMOTE_TO_3D=YES` takes the heights of 2D CRSs as ellipsoidal heights, so that
 datum transformations change them, as GDAL does after `PromoteTo3D` on both CRSs
 (`terrio crs EPSG:28992 --to EPSG:4979 --dim 3 85000 447000 0 --ct-opt PROMOTE_TO_3D=YES`).

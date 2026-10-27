@@ -677,6 +677,21 @@ pub(crate) fn geoid_models(vertical: u32) -> Vec<(u32, u32, Vec<Arc<Op>>)> {
     same.into_iter().flat_map(|v| models(v, &t.geoids[&v])).collect()
 }
 
+/// The geoid models of a vertical CRS (as [`geoid_models`] finds them) that need grids, whether
+/// or not the grids can be found: when none of them can, [`geoid_models`] falls back to those
+/// listed without grids, which keep heights unchanged.
+pub(crate) fn geoid_grid_models(vertical: u32) -> Vec<Arc<Op>> {
+    let t = table();
+    let grids = |list: &[(u32, Lazy<OpLists>)]| -> Vec<Arc<Op>> {
+        list.iter().flat_map(|(_, lazy)| lazy.get(&t.text, |ids| t.lists(ids)).1.iter().cloned()).collect()
+    };
+    if let Some(list) = t.geoids.get(&vertical) {
+        return grids(list);
+    }
+    let Some(datum) = self::vertical(vertical).map(|v| v.datum).filter(|d| *d != 0) else { return Vec::new() };
+    t.geoids.iter().filter(|(c, _)| self::vertical(**c).is_some_and(|v| v.datum == datum)).flat_map(|(_, l)| grids(l)).collect()
+}
+
 /// The transformations from a vertical CRS to another that PROJ lists (vertical offsets, offsets
 /// and slopes, VERTCON and other grids, chained through an intermediate vertical CRS), given the
 /// grids that can be found. Empty when the EPSG dataset connects them by none but PROJ's ballpark.

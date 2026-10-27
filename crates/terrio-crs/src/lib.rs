@@ -1322,6 +1322,7 @@ impl Transformer {
             (1, "ballpark coordinate operation used between different ellipsoids; datum shift is unknown"),
             (2, "best coordinate operation needs a missing grid; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR"),
             (4, "coordinate operation used outside its area of use"),
+            (8, "geoid model needs a missing grid, so heights were kept unchanged; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR"),
         ] {
             if flags & bit != 0 {
                 (self.warning_handler)(message.into());
@@ -1403,6 +1404,17 @@ impl Transformer {
             return Err(Error::NoOperation("ALLOW_BALLPARK=NO: no geoid model or vertical transformation applies to this point".into()));
         }
         Ok(())
+    }
+
+    /// Records, for the warning, that a side's heights were kept unchanged although a geoid model
+    /// covering the point exists: its grid is missing. Under the strict options
+    /// [`check_vertical_policy`](Self::check_vertical_policy) has already refused the point.
+    fn note_missing_geoid(&self, vertical: Option<&std::sync::Arc<def::Vertical>>, p: datum::Point) {
+        let Some(code) = vertical.and_then(|v| v.code) else { return };
+        let (lon, lat) = (p.lon.to_degrees(), p.lat.to_degrees());
+        if epsg::geoid_grid_models(code).iter().any(|op| op.contains(lon, lat) && !op.available()) {
+            self.diagnostics.fetch_or(8, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// The 2D transformation of a point, with its height kept (or, for transformations PROJ runs
@@ -1569,6 +1581,7 @@ impl Transformer {
         }
         if self.src.vertical().is_some() && !geoid {
             self.check_vertical_policy(!h.src.models.is_empty())?;
+            self.note_missing_geoid(self.src.vertical(), p0);
         }
         if start.is_none() && self.src.vertical().is_some() {
             route::note(None, false, route::OpKind::Vertical);
@@ -1581,6 +1594,7 @@ impl Transformer {
             let Some((r, applied)) = run_model(ops, q, false) else { continue };
             if !applied {
                 self.check_vertical_policy(true)?;
+                self.note_missing_geoid(self.dst.vertical(), q);
             }
             let r = match &h.dst.routes[*j] {
                 Some(route) => route.apply(&h.dst.defs[*j], r.lon.to_degrees(), r.lat.to_degrees(), r, false).ok_or_else(fail)?,
@@ -1594,6 +1608,7 @@ impl Transformer {
         }
         if self.dst.vertical().is_some() {
             self.check_vertical_policy(!h.dst.models.is_empty())?;
+            self.note_missing_geoid(self.dst.vertical(), p);
             route::note(None, false, route::OpKind::Vertical);
         }
         let q = h.middle(i, 0).apply(&h.src.defs[i], sx, sy, p, true).ok_or_else(fail)?;
