@@ -317,6 +317,13 @@ pub fn refresh_overviews(path: &str, options: &RefreshOptions) -> Result<Vec<(us
     if options.external && !target.is_file() {
         return Err(Error::InvalidArgument(format!("'{}' has no external overviews ({} is missing)", path, target.display())));
     }
+    // Over an extent, the sidecar keeps its other pixels from the raster's overviews, which are
+    // its internal ones when it has them.
+    if options.external && !options.bbox.is_empty() && parse_file(std::path::Path::new(path))?.dirs.iter().any(Directory::is_overview) {
+        return Err(Error::InvalidArgument(format!(
+            "'{path}' has internal overviews: its external overviews cannot be refreshed over an extent"
+        )));
+    }
     gtiff_update::update_file(&target, move |f| {
         let out = refresh(f, &mut src, options);
         drop(src);
@@ -589,6 +596,20 @@ fn slice_rows(data: &RasterData, rows: usize, cols: usize, bands: usize, range: 
         let mut out = Vec::with_capacity(range.len() * cols * bands);
         for b in 0..bands {
             out.extend_from_slice(&v[(b * rows + range.start) * cols..(b * rows + range.end) * cols]);
+        }
+        out
+    })
+}
+
+/// Columns `range` of a band-major image of `rows` rows of `cols` columns.
+fn slice_cols(data: &RasterData, rows: usize, cols: usize, bands: usize, range: std::ops::Range<usize>) -> RasterData {
+    crate::pixel::map_data!(data, v => {
+        let mut out = Vec::with_capacity(range.len() * rows * bands);
+        for b in 0..bands {
+            for r in 0..rows {
+                let i = (b * rows + r) * cols;
+                out.extend_from_slice(&v[i + range.start..i + range.end]);
+            }
         }
         out
     })
@@ -962,6 +983,10 @@ fn add_internal<F: Read + Write + Seek>(
     ignore_cog_layout_break: bool,
 ) -> Result<Vec<(usize, usize)>> {
     let tiff = gtiff_update::parse(file)?;
+    if factors.is_empty() {
+        // Nothing to add, so a Cloud Optimized GeoTIFF's layout is not broken for nothing.
+        return Ok(sorted_sizes(images(&tiff).overviews.iter().map(|o| o.0).collect()));
+    }
     gtiff_update::break_cog_layout(file, tiff.big, ignore_cog_layout_break)?;
     let im = images(&tiff);
     let main = im.main.ok_or_else(|| Error::InvalidData("the TIFF has no full-resolution image".into()))?;
@@ -1085,13 +1110,23 @@ pub(crate) fn replace_chunks<F: Write + Seek>(
         return Err(Error::InvalidData("an overview changed size".into()));
     }
     let rows_n = c.rows.len();
+    // Only the tile columns of `cols` are encoded (strips span the whole width).
+    let tile_w = if dir.tiled() { dir.uint(322).unwrap_or(256) as usize } else { w };
+    let (tx0, tx1) = (cols.start / tile_w, cols.end.div_ceil(tile_w).min(w.div_ceil(tile_w)));
+    let (x0, x1) = (tx0 * tile_w, (tx1 * tile_w).min(w));
+    let whole = (x0, x1) == (0, w);
     let (img, chunk) = match mask_of {
         None => {
             let (layout, compression, codec) = layout_like(dir, None, false, data_type)?;
             if dir.uint(277).unwrap_or(1) as usize != bands {
                 return Err(Error::InvalidData("an overview has another band count than the raster".into()));
             }
-            let level = gw::Level { cols: w, rows: rows_n, bands, data: std::borrow::Cow::Borrowed(&c.data) };
+            let data = if whole {
+                std::borrow::Cow::Borrowed(&c.data)
+            } else {
+                std::borrow::Cow::Owned(slice_cols(&c.data, rows_n, w, bands, x0..x1))
+            };
+            let level = gw::Level { cols: x1 - x0, rows: rows_n, bands, data };
             let chunk = chunk_size(&layout, w);
             (level.image(data_type, compression, &codec, &layout)?, chunk)
         }
@@ -1103,7 +1138,12 @@ pub(crate) fn replace_chunks<F: Write + Seek>(
             } else {
                 (w, dir.uint(278).unwrap_or(h as u64).max(1) as usize)
             };
-            (gw::mask_image(m, w, rows_n, (chunk.0, chunk.1.min(rows_n), tiled))?, chunk)
+            let m = if whole {
+                std::borrow::Cow::Borrowed(m.as_slice())
+            } else {
+                std::borrow::Cow::Owned(m.chunks(w).flat_map(|row| &row[x0..x1]).copied().collect())
+            };
+            (gw::mask_image(&m, x1 - x0, rows_n, (chunk.0, chunk.1.min(rows_n), tiled))?, chunk)
         }
     };
     let (cw, ch) = (chunk.0, chunk.1.min(h.max(1)));
@@ -1118,17 +1158,15 @@ pub(crate) fn replace_chunks<F: Write + Seek>(
     if offsets.len() != planes * across * down || counts.len() != offsets.len() {
         return Err(Error::InvalidData("an overview's chunk offsets do not match its size".into()));
     }
-    let strip_per_plane = across * strip_down;
+    // The encoded level's chunks: the covered tile columns, from the first.
+    let covered = tx1 - tx0;
+    let strip_per_plane = covered * strip_down;
     if img.chunks.len() != planes * strip_per_plane {
         return Err(Error::InvalidData("an overview's layout differs from the one recomputed".into()));
     }
-    let (tx0, tx1) = (cols.start / cw, cols.end.div_ceil(cw).min(across));
     for (k, chunk) in img.chunks.into_iter().enumerate() {
         let (plane, j) = (k / strip_per_plane, k % strip_per_plane);
-        let (ty, tx) = (j / across + c.rows.start / ch, j % across);
-        if tx < tx0 || tx >= tx1 {
-            continue;
-        }
+        let (ty, tx) = (j / covered + c.rows.start / ch, j % covered + tx0);
         let idx = plane * across * down + ty * across + tx;
         offsets[idx] = a.write(&chunk)?;
         counts[idx] = chunk.len() as u64;
@@ -1156,7 +1194,6 @@ fn delete_internal<F: Read + Write + Seek>(file: &mut F, ignore_cog_layout_break
 pub(crate) fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &RefreshOptions) -> Result<Vec<(usize, usize)>> {
     warn_integer_precision(src.data_type());
     let tiff = gtiff_update::parse(file)?;
-    gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     let im = images(&tiff);
     let (w, h) = (src.width(), src.height());
     if let Some(f) = o.levels.iter().find(|f| **f < 2) {
@@ -1210,6 +1247,7 @@ pub(crate) fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster
         crate::warnings::warn("the extents to refresh do not intersect the raster: no overview changed".into());
         return Ok(Vec::new());
     };
+    gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     let sizes: Vec<(usize, usize)> = targets.iter().map(|t| t.0).collect();
     let blocks: Vec<(usize, usize)> = targets
         .iter()
@@ -1249,8 +1287,10 @@ pub(crate) fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster
         let mut c = compute(&mut srcs, size, r0..r1, prev.as_ref(), method, data[k], masks[k].filter(|_| mask.is_some()), dx0)?;
         if (dx0, dy0, dx1, dy1) != (0, 0, size.0, size.1) {
             // Outside the region, the overview keeps its pixels.
-            let level = srcs.src.overviews().iter().position(|s| *s == size);
-            let (old, old_mask) = srcs.rows(level, size, r0..r1, None, c.mask.is_some())?;
+            let level = srcs.src.overviews().iter().position(|s| *s == size).ok_or_else(|| {
+                Error::InvalidData(format!("the raster has no stored overview of {}x{} to keep its pixels from", size.0, size.1))
+            })?;
+            let (old, old_mask) = srcs.rows(Some(level), size, r0..r1, None, c.mask.is_some())?;
             keep_outside(&mut c, &old, old_mask.as_deref(), dx0..dx1, dy0..dy1, srcs.src.band_count());
         }
         let mut dir = replace_chunks(&mut a, &tiff.dirs[i], &c, dx0..dx1, srcs.src.data_type(), srcs.src.band_count(), None)?;

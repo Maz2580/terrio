@@ -7,7 +7,7 @@ from typing import Any, Literal, Protocol, TypeAlias, final, overload
 import numpy as np
 from numpy.typing import DTypeLike, NDArray
 
-# PyO3 sets `__all__` to the names added to the module, in registration order.
+# PyO3 sets `__all__` to the names added to the module.
 __all__ = [
     "create_raster",
     "edit_raster",

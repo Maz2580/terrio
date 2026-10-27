@@ -235,3 +235,82 @@ fn moves_follow_gdalmove() {
     assert_eq!(lazy.crs().epsg, Some(26913));
     assert_eq!(lazy.geo_transform(), r.geo_transform);
 }
+
+#[test]
+fn partial_refreshes_recompute_only_the_covered_tiles() {
+    use terrio::ops::overview::RefreshOptions;
+    let dir = tempfile::tempdir().unwrap();
+    let a = write(dir.path(), "a.tif", &sample(256, 192), &tiled());
+    add_overviews(&a, &OverviewOptions { levels: vec![2], ..Default::default() }).unwrap();
+    let before = level(&a, Some(0));
+    let whole = dir.path().join("whole.tif");
+    std::fs::copy(&a, &whole).unwrap();
+    let average = RefreshOptions { resampling: Some(Resampling::Average), ..Default::default() };
+    refresh_overviews(whole.to_str().unwrap(), &average).unwrap();
+    let whole = level(whole.to_str().unwrap(), Some(0));
+    assert_ne!(whole, before);
+    // Overview columns 50..100 and 75..125 (two tile columns, then one) are the refreshed ones.
+    for (x0, x1) in [(100.0, 200.0), (150.0, 250.0)] {
+        let part = dir.path().join("part.tif");
+        std::fs::copy(&a, &part).unwrap();
+        let part = part.to_str().unwrap();
+        let bbox = vec![[500000.0 + 30.0 * x0, 4094240.0, 500000.0 + 30.0 * x1, 4100000.0]];
+        refresh_overviews(part, &RefreshOptions { bbox, resampling: Some(Resampling::Average), ..Default::default() }).unwrap();
+        let got = level(part, Some(0));
+        let cols = (x0 / 2.0) as usize..(x1 / 2.0) as usize;
+        for y in 0..96 {
+            for x in 0..128 {
+                let i = y * 128 + x;
+                let expected = if cols.contains(&x) { whole[i] } else { before[i] };
+                assert_eq!(got[i], expected, "({x}, {y}) refreshing {x0}..{x1}");
+            }
+        }
+    }
+}
+
+#[test]
+fn external_overviews_cannot_be_refreshed_over_an_extent_beside_internal_ones() {
+    use terrio::ops::overview::RefreshOptions;
+    let dir = tempfile::tempdir().unwrap();
+    let b = write(dir.path(), "b.tif", &sample(200, 150), &tiled());
+    add_overviews(&b, &OverviewOptions { levels: vec![2], external: true, ..Default::default() }).unwrap();
+    add_overviews(&b, &OverviewOptions { levels: vec![4], ..Default::default() }).unwrap();
+    let bbox = vec![[500000.0, 4090000.0, 500300.0, 4100000.0]];
+    assert!(refresh_overviews(&b, &RefreshOptions { external: true, bbox, ..Default::default() }).is_err());
+    assert!(refresh_overviews(&b, &RefreshOptions { external: true, ..Default::default() }).is_ok());
+}
+
+#[test]
+fn adding_no_overviews_leaves_the_file_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    // Under 256 pixels: GDAL's automatic levels are none.
+    let path = write(dir.path(), "small.tif", &sample(200, 100), &tiled());
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(add_overviews(&path, &OverviewOptions::default()).unwrap(), Vec::<(usize, usize)>::new());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn cog_layout_is_kept_when_no_overview_changes() {
+    use terrio::ops::overview::RefreshOptions;
+    let dir = tempfile::tempdir().unwrap();
+    let cog = write(
+        dir.path(),
+        "c.tif",
+        &sample(64, 64),
+        &RasterWriteOptions {
+            driver: Some(terrio::formats::RasterDriver::Cog),
+            tile_size: Some(16),
+            overviews: vec![2],
+            ..Default::default()
+        },
+    );
+    let bytes = std::fs::read(&cog).unwrap();
+    // An extent off the raster changes no overview, so the layout is not broken.
+    let off = RefreshOptions { bbox: vec![[0.0, 0.0, 1.0, 1.0]], ..Default::default() };
+    assert!(refresh_overviews(&cog, &off).unwrap().is_empty());
+    assert_eq!(std::fs::read(&cog).unwrap(), bytes);
+    // Under 256 pixels there are no automatic levels to add.
+    assert_eq!(add_overviews(&cog, &OverviewOptions::default()).unwrap(), vec![(32, 32), (16, 16)]);
+    assert_eq!(std::fs::read(&cog).unwrap(), bytes);
+}

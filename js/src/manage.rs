@@ -32,7 +32,6 @@ struct CreateArgs {
 
 /// Creates a filled raster Dataset. `like` is a raster or null; options override its header.
 /// Options: size, bandCount, ot, crs, bbox, nodata, unsetNodata, burn, metadata, copyMetadata.
-/// Add overview levels to the encoded GeoTIFF with addOverviews.
 #[wasm_bindgen(js_name = createRaster)]
 pub fn create_raster(like: JsValue, options: JsValue) -> Result<Dataset, JsError> {
     let a: CreateArgs = parse_options(&options)?;

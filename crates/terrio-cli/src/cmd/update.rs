@@ -49,7 +49,7 @@ pub fn run(a: Args) -> terrio::Result<()> {
     let mut src = super::rasterout::open_lazy(&a.input)?;
     match super::quiet(|| update_raster(&mut src, &a.output, &o))? {
         Some(w) => println!("updated {}x{} pixels at ({}, {})", w.width, w.height, w.x, w.y),
-        None => println!("the source does not overlap the destination: nothing changed"),
+        None => println!("nothing changed: the source does not overlap the destination or has no valid pixels in it"),
     }
     Ok(())
 }

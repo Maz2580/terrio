@@ -34,7 +34,8 @@ pub struct UpdateOptions {
 }
 
 /// What [`update_raster`] changed: the window of the destination (`x`, `y`, `width`, `height`
-/// in pixels) whose blocks were rewritten, `None` when the source does not overlap it.
+/// in pixels) whose blocks were rewritten, `None` when the source does not overlap it or has no
+/// valid pixels in it (nothing was rewritten).
 pub type UpdatedWindow = Option<Window>;
 
 /// Writes `src` into the local GeoTIFF `dst`.
@@ -70,7 +71,9 @@ pub fn update_raster_bytes(src: &mut LazyRaster, dst: &[u8], options: &UpdateOpt
 }
 
 /// Owned-buffer update: shares the input with its lazy reader, retaining at most the
-/// immutable reader and writable output file buffers at each stage.
+/// immutable reader and writable output file buffers at each stage. The output is a copy of
+/// the input (the reader keeps the original), and an overview refresh copies the updated file
+/// once more for its reader: peak memory is about two copies of the TIFF.
 pub fn update_raster_bytes_owned(src: &mut LazyRaster, dst: Vec<u8>, options: &UpdateOptions) -> Result<Vec<u8>> {
     let bytes = std::sync::Arc::new(dst);
     let mut target =
