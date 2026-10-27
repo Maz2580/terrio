@@ -578,8 +578,10 @@ const MAX_DELETE_KEYS: usize = 1000;
 /// (`POST ?delete`). A key XML cannot carry (a control character) is deleted with a request of its
 /// own, between the batches before and after it, as is every key once the service answers that
 /// it does not implement multi-object deletion (some S3-compatible services do not). Missing
-/// objects are not errors; a key the service fails to delete is, after its batch.
-pub(crate) fn delete_objects(bucket: &str, keys: &[String]) -> Result<()> {
+/// objects are not errors; a key the service fails to delete is, after its batch. The `groups`
+/// are deleted one after another: no request mixes keys of two groups, and a group starts once
+/// the previous one is deleted.
+pub(crate) fn delete_objects(bucket: &str, groups: &[&[String]]) -> Result<()> {
     let one = |key: &str| delete(&Remote::S3(S3Object { bucket: bucket.to_string(), key: key.to_string() }));
     let mut multi = true;
     // The pending keys, with their XML text.
@@ -593,18 +595,21 @@ pub(crate) fn delete_objects(bucket: &str, keys: &[String]) -> Result<()> {
         batch.clear();
         Ok(())
     };
-    for key in keys {
-        if let Some(xml) = xml_key(key).filter(|_| multi) {
-            batch.push((key, xml));
-            if batch.len() == MAX_DELETE_KEYS {
+    for group in groups {
+        for key in group.iter() {
+            if let Some(xml) = xml_key(key).filter(|_| multi) {
+                batch.push((key, xml));
+                if batch.len() == MAX_DELETE_KEYS {
+                    flush(&mut batch, &mut multi)?;
+                }
+            } else {
                 flush(&mut batch, &mut multi)?;
+                one(key)?;
             }
-        } else {
-            flush(&mut batch, &mut multi)?;
-            one(key)?;
         }
+        flush(&mut batch, &mut multi)?;
     }
-    flush(&mut batch, &mut multi)
+    Ok(())
 }
 
 /// One `DeleteObjects` request, in quiet mode (only failures are reported). `false` when the

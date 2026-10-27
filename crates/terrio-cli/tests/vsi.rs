@@ -560,10 +560,10 @@ fn recursive_deletes_send_up_to_1000_keys_per_request() {
     assert_eq!(serde_json::from_str::<serde_json::Value>(&deleted).unwrap()["deleted"], 1502);
     let s = store.lock().unwrap();
     assert_eq!(s.objects.keys().collect::<Vec<_>>(), ["bkt/many2/keep"]);
-    // 1502 objects and 2 directory markers: 3 batches and 1 DELETE, in key order (before: one
+    // 1502 objects, then 2 directory markers: 4 batches and 1 DELETE, in key order (before: one
     // DELETE per key, 1504).
     let deletes: Vec<&String> = s.log.iter().filter(|l| l.starts_with("POST") || l.starts_with("DELETE")).collect();
-    assert_eq!(deletes.len(), 4, "{deletes:?}");
+    assert_eq!(deletes.len(), 5, "{deletes:?}");
     assert!(deletes[0].starts_with("POST") && deletes[1].starts_with("DELETE /bkt/many/ctl"), "{deletes:?}");
     assert_eq!((s.missing_md5, s.unsigned), (0, 0));
 }

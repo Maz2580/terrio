@@ -531,7 +531,7 @@ fn stat_node(node: &Node) -> Result<Option<Stat>> {
 fn stat_input(input: &str, node: &Node, listing: bool) -> Result<Option<Stat>> {
     #[cfg(remote)]
     if let Node::Url { .. } = node
-        && (listing || input.trim().ends_with('/'))
+        && (listing || input.trim().split('?').next().is_some_and(|path| path.ends_with('/')))
     {
         return remote_stat(node, true);
     }
@@ -2010,14 +2010,14 @@ pub fn delete(path: &str, recursive: bool) -> Result<Report> {
     }
     #[cfg(remote)]
     if let Node::S3 { bucket, key } = &node {
-        // The objects, then the directory markers (zero-byte `prefix/` keys, listed with a size)
-        // deepest first and the directory's own: up to 1000 keys per request.
-        let mut keys: Vec<String> = entries.iter().filter(|e| !e.is_dir()).map(|e| join_key(key, &e.name)).collect();
-        let files = keys.len() as u64;
-        keys.extend(entries.iter().rev().filter(|e| e.is_dir() && e.size.is_some()).map(|e| format!("{key}/{}/", e.name)));
-        keys.push(format!("{key}/"));
-        crate::http::store::delete_objects(bucket, &keys)?;
-        report.deleted += files;
+        // The objects, up to 1000 keys per request; once all are deleted, the directory markers
+        // (zero-byte `prefix/` keys, listed with a size) deepest first and the directory's own.
+        let files: Vec<String> = entries.iter().filter(|e| !e.is_dir()).map(|e| join_key(key, &e.name)).collect();
+        let mut markers: Vec<String> =
+            entries.iter().rev().filter(|e| e.is_dir() && e.size.is_some()).map(|e| format!("{key}/{}/", e.name)).collect();
+        markers.push(format!("{key}/"));
+        crate::http::store::delete_objects(bucket, &[files.as_slice(), markers.as_slice()])?;
+        report.deleted += files.len() as u64;
         return Ok(report);
     }
     for e in &entries {

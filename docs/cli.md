@@ -1546,7 +1546,7 @@ send the body (twice the file size in local reads). Uploads staged through a tem
 (from remote, in-memory or archive sources) are hashed as they are staged, and read once.
 ETag sync can add a separate MD5 pass. Payload hashes are retained (no `UNSIGNED-PAYLOAD`) for
 compatibility with signed endpoints that require them. Recursive S3 deletion sends up to 1,000
-keys per `DeleteObjects` request, reporting the first key the service could not delete; a
+keys per `DeleteObjects` request, directory markers only once the objects are deleted, reporting the first key the service could not delete; a
 service that answers that it does not implement it (405, 501, or 400 `NotImplemented`) is sent
 one `DELETE` per key, as are keys with control characters, which XML cannot carry, between the
 batches around them. Azure blobs are deleted one request each.
