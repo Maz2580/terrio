@@ -1324,7 +1324,7 @@ impl Transformer {
             (4, "coordinate operation used outside its area of use"),
             (
                 8,
-                "geoid model did not apply (its grid is missing or could not be read), so heights were kept unchanged; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR",
+                "geoid model did not apply (its grid is missing, unreadable, or has no value at the point), so heights were not converted by it; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR",
             ),
         ] {
             if flags & bit != 0 {
@@ -1409,12 +1409,15 @@ impl Transformer {
         Ok(())
     }
 
-    /// Records, for the warning, that a side's heights were kept unchanged although a geoid model
-    /// with a grid covers the point: the grid is missing, or could not be read or downloaded
-    /// (availability alone cannot tell, as a `.tif` counts as available with the network on).
-    /// Callers have established that no geoid model applied. Under the strict options
-    /// [`check_vertical_policy`](Self::check_vertical_policy) has already refused the point.
+    /// Records, for the warning, that a side's heights were not converted by a geoid model although
+    /// one with a grid covers the point: its grid is missing, could not be read or downloaded
+    /// (availability alone cannot tell, as a `.tif` counts as available with the network on), or
+    /// has no value there. Callers have established that no geoid model applied. Under the strict
+    /// options [`check_vertical_policy`](Self::check_vertical_policy) has already refused the point.
     fn note_missing_geoid(&self, vertical: Option<&std::sync::Arc<def::Vertical>>, p: datum::Point) {
+        if self.diagnostics.load(std::sync::atomic::Ordering::Relaxed) & 8 != 0 {
+            return; // already recorded: the warning is reported once
+        }
         let Some(code) = vertical.and_then(|v| v.code) else { return };
         let (lon, lat) = (p.lon.to_degrees(), p.lat.to_degrees());
         if epsg::geoid_grid_models(code).iter().any(|op| op.contains(lon, lat)) {

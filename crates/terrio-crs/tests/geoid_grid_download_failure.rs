@@ -3,15 +3,19 @@
 //! and network setting are process-wide.
 #![cfg(all(feature = "grid-transport", not(target_family = "wasm")))]
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use terrio_crs::{
     SpatialRef, TransformOptions, Transformer,
     network::{self, GridStream, GridTransport},
 };
 
-struct Unreachable;
+struct Unreachable(Arc<AtomicUsize>);
 impl GridTransport for Unreachable {
     fn open(&self, _: &str) -> std::io::Result<Box<dyn GridStream>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
         Err(std::io::ErrorKind::NotFound.into())
     }
 }
@@ -20,7 +24,8 @@ impl GridTransport for Unreachable {
 fn a_geoid_grid_that_fails_to_download_is_reported() {
     terrio_crs::set_grid_search_paths(Some(Vec::new()));
     terrio_crs::set_network_enabled(Some(true));
-    network::set_grid_transport(Arc::new(Unreachable));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    network::set_grid_transport(Arc::new(Unreachable(attempts.clone())));
     let _ = terrio_crs::take_warnings();
     let t = Transformer::with_options(
         &SpatialRef::parse("EPSG:7843").unwrap(),
@@ -29,6 +34,8 @@ fn a_geoid_grid_that_fails_to_download_is_reported() {
     )
     .unwrap();
     assert_eq!(t.transform_3d(144.9691, -37.8177, 40.0).unwrap().2, 40.0);
+    // The download was attempted and failed, rather than skipped before reaching the transport
+    assert!(attempts.load(Ordering::SeqCst) > 0);
     t.flush_warnings();
     assert!(terrio_crs::take_warnings().iter().any(|w| w.contains("geoid model did not apply")));
 }
