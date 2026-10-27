@@ -1918,7 +1918,8 @@ updated with an unchanged sidecar.
 
 Building or wholly refreshing overviews reads the full-resolution sources the levels need
 (the image, its mask, or both) once, forward, in full-width strips of whole blocks (about
-64 MB of values at a time). Every level computed from full resolution is computed in that
+64 MB of values at a time, and at least a row of blocks, which on very wide tiled rasters is
+larger). Every level computed from full resolution is computed in that
 pass: in GDAL's chunks of rows (`GDALRegenerateOverviewsEx`, 5 to 10 MB of values per
 band), or in strips holding every source window (`GDALRegenerateOverviewsMultiBand`'s
 schedule), with the pixels of a whole read. A level computed from the previous one reads

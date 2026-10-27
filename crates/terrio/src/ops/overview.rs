@@ -8,8 +8,9 @@
 //! one being built, the valid pixels (not nodata, not masked out by a per-dataset mask) only,
 //! internal overviews take the full-resolution image's compression, predictor and tile size (128
 //! pixel tiles for a striped image), and a raster with an internal mask gets mask overviews. The
-//! full-resolution image is read once, by strips of rows, rather than whole. The file is changed
-//! through a copy renamed over it, so a failure leaves it as it was.
+//! full-resolution image is read once, by strips of rows, rather than whole, for whole levels
+//! (partial refreshes read the rows over their region). The file is changed through a copy
+//! renamed over it, so a failure leaves it as it was.
 //!
 //! ```no_run
 //! use terrio::ops::Resampling;
@@ -723,6 +724,12 @@ fn from_values(data_type: DataType, values: Vec<f64>) -> RasterData {
 
 /// What a level is computed from: the previous level (computed, or stored at `level`) or full
 /// resolution.
+/// Whether a level of width `width` scheduled with `sched` is computed from the previous level
+/// computed (of width `prev_width`), rather than from full resolution.
+fn cascades(sched: Schedule, prev_width: usize, width: usize) -> bool {
+    sched.from_prev && prev_width > width
+}
+
 fn source_of<'c>(
     sched: Schedule,
     prev: Option<&'c Computed>,
@@ -730,7 +737,7 @@ fn source_of<'c>(
     full: (usize, usize),
     overviews: &[(usize, usize)],
 ) -> ((usize, usize), Option<usize>, Option<&'c Computed>) {
-    match prev.filter(|p| sched.from_prev && p.size.0 > size.0) {
+    match prev.filter(|p| cascades(sched, p.size.0, size.0)) {
         Some(p) => (p.size, overviews.iter().position(|s| *s == p.size), Some(p)),
         None => (full, None, None),
     }
@@ -902,19 +909,20 @@ fn whole_levels(
     mut each: impl FnMut(&mut Sources, usize, &Computed) -> Result<()>,
 ) -> Result<()> {
     let full = (srcs.src.width(), srcs.src.height());
-    // Whether a level's part is computed from the previous level, as `source_of` chooses.
-    let cascades = |k: usize, mask: bool| {
+    // Whether a level's part is computed from the previous level, as `source_of` chooses (for the
+    // mask, when the previous level has one).
+    let from_prev = |k: usize, mask: bool| {
         let l = &levels[k];
         let sched = if mask { l.mask } else { Some(l.data) };
-        k > 0 && sched.is_some_and(|s| s.from_prev) && levels[k - 1].size.0 > l.size.0 && (!mask || levels[k - 1].mask.is_some())
+        k > 0 && sched.is_some_and(|s| cascades(s, levels[k - 1].size.0, l.size.0)) && (!mask || levels[k - 1].mask.is_some())
     };
     let parts_of = |k: usize| [Some(false), levels[k].mask.map(|_| true)].into_iter().flatten().map(move |mask| Job { level: k, mask });
-    let first: Vec<Job> = (0..levels.len()).flat_map(parts_of).filter(|j| !cascades(j.level, j.mask)).collect();
+    let first: Vec<Job> = (0..levels.len()).flat_map(parts_of).filter(|j| !from_prev(j.level, j.mask)).collect();
     let mut parts: Parts = (0..levels.len()).map(|_| (None, None)).collect();
     run_jobs(srcs, None, full, levels, &first, &mut parts)?;
     let mut prev: Option<Computed> = None;
     for (k, level) in levels.iter().enumerate() {
-        let jobs: Vec<Job> = parts_of(k).filter(|j| cascades(j.level, j.mask)).collect();
+        let jobs: Vec<Job> = parts_of(k).filter(|j| from_prev(j.level, j.mask)).collect();
         if let Some(p) = prev.as_ref().filter(|_| !jobs.is_empty()) {
             run_jobs(srcs, Some(p), p.size, levels, &jobs, &mut parts)?;
         }
@@ -1141,18 +1149,19 @@ fn run_jobs(
         }
         let src_mask = held.mask(&rows, w).filter(|_| use_mask(l));
         let t = kernel::Target { width: l.size.0, height: l.size.1, data_type, nodata, method: l.method };
-        let alpha: Option<Vec<bool>> =
-            srcs.alpha.filter(|_| masked && src_mask.is_none()).map(|a| held.band(a, &rows, w).iter().map(|v| *v != 0.0).collect());
+        // The mask's or the alpha band's validity, shared by the bands; else each band's nodata.
+        let shared: Option<Vec<bool>> = match src_mask {
+            _ if !masked => None,
+            Some(m) => Some(m.iter().map(|v| *v != 0).collect()),
+            None => srcs.alpha.map(|a| held.band(a, &rows, w).iter().map(|v| *v != 0.0).collect()),
+        };
         for b in 0..bands {
             let values = held.band(b, &rows, w);
-            let valid: Option<Vec<bool>> = match (src_mask, &alpha, nodata) {
-                _ if !masked => None,
-                (Some(m), ..) => Some(m.iter().map(|v| *v != 0).collect()),
-                (None, Some(a), _) => Some(a.clone()),
-                (None, None, Some(nd)) => Some(values.iter().map(|v| !(*v == nd || (v.is_nan() && nd.is_nan()))).collect()),
-                (None, None, None) => None,
+            let own: Option<Vec<bool>> = match (&shared, nodata) {
+                (None, Some(nd)) if masked => Some(values.iter().map(|v| !(*v == nd || (v.is_nan() && nd.is_nan()))).collect()),
+                _ => None,
             };
-            let out = band(&values, valid.as_deref(), &t);
+            let out = band(&values, shared.as_deref().or(own.as_deref()), &t);
             let dst = parts[job.level].0.as_mut().expect("the data is allocated");
             put_values(dst, (b * l.size.1 + out_rows.start) * l.size.0, &out);
         }
