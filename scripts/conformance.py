@@ -486,6 +486,10 @@ def suite_raster_manage(ctx):
     if missing:
         suite.skipped = "needs the Python modules " + ", ".join(missing)
         return suite
+    tools = [t for t in ("gdal_create", "gdaladdo", "gdal_edit.py", "gdal") if shutil.which(t) is None]
+    if tools:
+        suite.skipped = "needs the GDAL commands " + ", ".join(tools) + " (gdal raster update: 3.12 or later)"
+        return suite
     code, out, err = run([sys.executable, str(SCRIPTS / "compare_raster_manage_with_gdal.py"), ctx.data,
                           "--terrio", ctx.terrio, "--json"])
     try:
@@ -494,7 +498,8 @@ def suite_raster_manage(ctx):
         suite.error = tail(err or out) or f"comparison exited {code} without valid JSON"
         return suite
     for result in results:
-        suite.cases.append(Case("raster management", result["name"], result["status"], result["detail"]))
+        status = {"identical": IDENTICAL, "tolerance": TOLERANCE}.get(result["status"], DIFFERS)
+        suite.cases.append(Case("raster management", result["name"], status, result["detail"]))
     if not results or (code and not any(case.status == DIFFERS for case in suite.cases)):
         suite.error = tail(err or out) or f"comparison exited {code} without complete results"
     return suite

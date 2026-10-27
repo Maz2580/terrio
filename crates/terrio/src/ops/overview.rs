@@ -347,6 +347,9 @@ pub fn refresh_overviews_in_bytes(tiff: &[u8], options: &RefreshOptions) -> Resu
 /// edges transformed when the raster has another CRS): a `--like` dataset's extent.
 pub fn dataset_bounds(path: &str, crs: &crate::crs::SpatialRef) -> Result<[f64; 4]> {
     let r = crate::open_raster_lazy(path)?;
+    if !r.has_geo_transform() {
+        return Err(Error::InvalidArgument(format!("'{path}' has no geotransform: its extent is unknown")));
+    }
     let gt = r.geo_transform();
     let (w, h) = (r.width() as f64, r.height() as f64);
     let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)].map(|(c, l)| super::apply_gt(&gt, c, l));
@@ -1389,6 +1392,17 @@ mod tests {
         for invalid in ["-1", "AUTO-", "AUTO--1", "bilinear"] {
             assert!(OverviewSelection::parse(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn like_datasets_without_a_geotransform_are_refused() {
+        let config = wbraster::RasterConfig { cols: 2, rows: 2, bands: 1, data_type: DataType::U8, ..Default::default() };
+        let raster = wbraster::Raster::from_data(config, vec![1., 2., 3., 4.]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unreferenced.tif");
+        std::fs::write(&path, gw::encode(&raster, &gw::TiffOptions { georeferenced: false, ..Default::default() }).unwrap()).unwrap();
+        let err = dataset_bounds(path.to_str().unwrap(), &crate::crs::SpatialRef::default()).unwrap_err();
+        assert!(err.to_string().contains("has no geotransform"), "{err}");
     }
 
     #[test]

@@ -203,6 +203,7 @@ fn georeferencing(
     gt: [f64; 6],
     gcps: &[Gcp],
     area_or_point: Option<&str>,
+    georeferenced: bool,
 ) -> Result<Vec<(u16, Value)>> {
     let (cols, rows) = (src.width(), src.height());
     let mut metadata = Vec::new();
@@ -225,7 +226,7 @@ fn georeferencing(
         metadata,
         data: wbraster::raster::RasterData::new_filled(src.data_type(), 0, 0.0),
     };
-    let opts = gw::TiffOptions { geo_transform: Some(gt), gcps: gcps.to_vec(), ..Default::default() };
+    let opts = gw::TiffOptions { geo_transform: Some(gt), gcps: gcps.to_vec(), georeferenced, ..Default::default() };
     gw::georeferencing_tags(&raster, &opts)
 }
 
@@ -268,7 +269,10 @@ fn edit_tiff<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &Edi
         } else {
             src.header().gcps
         };
-        let tags = georeferencing(src, &crs, gt, &gcps, new_aop.as_deref())?;
+        // A raster without a geotransform of its own keeps having none unless one is given: a
+        // CRS or AREA_OR_POINT change must not write the unit-pixel fallback.
+        let georeferenced = o.bbox.is_some() || o.geo_transform.is_some() || !gcps.is_empty() || src.has_geo_transform();
+        let tags = georeferencing(src, &crs, gt, &gcps, new_aop.as_deref(), georeferenced)?;
         let d = &mut dirs[main];
         let replace: Vec<u16> =
             [if transform_changed { &TRANSFORM_TAGS[..] } else { &[] }, if crs_changed { &CRS_TAGS[..] } else { &[] }].concat();
@@ -640,6 +644,19 @@ mod tests {
             assert!(matches!(&err, Error::Unsupported(m) if m.contains(reason)), "{err}");
         }
         assert!(move_raster_bytes(&tiff(&gw::TiffOptions::default()), &o).unwrap().1.updated);
+    }
+
+    #[test]
+    fn crs_and_area_or_point_edits_keep_an_unreferenced_file_unreferenced() {
+        let bytes = tiff(&gw::TiffOptions { georeferenced: false, ..Default::default() });
+        let o = EditOptions {
+            crs: Some(SpatialRef::from_epsg(3857).unwrap()),
+            metadata: vec![("AREA_OR_POINT".into(), "Point".into())],
+            ..Default::default()
+        };
+        let edited = LazyRaster::from_tiff_bytes(edit_raster_bytes(&bytes, &o).unwrap()).unwrap().unwrap();
+        assert!(!edited.has_geo_transform());
+        assert!(!edited.crs().is_unknown());
     }
 
     #[test]
