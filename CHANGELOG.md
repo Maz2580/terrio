@@ -9,6 +9,11 @@
   (`N37W120.hgt`), `.hgt.zip` archives, and the NASADEM and water body variants.
   Tiles are written as Int16 with -32768 for nodata; a grid of another size is
   refused.
+- SRTM HGT tiles and the other raw-layout rasters (EHdr, ENVI, SAGA, ERS,
+  Idrisi, Surfer 6 binary grids) are read in place (#333): `open_raster_lazy`
+  reads only the header, a window reads only the rows it covers, and `info`
+  decodes no pixels. Remote SRTM tiles are read with HTTP range requests, and
+  `convert` to a GeoTIFF or COG writes these inputs a strip at a time.
 
 ### Breaking changes
 

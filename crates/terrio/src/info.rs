@@ -325,7 +325,9 @@ fn lazy_raster_info_at(r: &mut LazyRaster, options: &InfoOptions, path: Option<&
         return Ok(info);
     }
     if options.histogram {
-        let ds = r.read()?;
+        let mut ds = r.read()?;
+        // A window leaves out the dataset's metadata items, which the summary lists.
+        ds.raster.metadata = r.metadata();
         let mut info = raster_info_at(&ds, options, path, Some(r));
         info.overviews = overviews;
         return Ok(info);
@@ -392,7 +394,7 @@ pub fn info_path(path: &str, options: &InfoOptions) -> crate::Result<Info> {
         return result;
     }
     if let Some(r) = crate::drivers::open_lazy(path) {
-        return Ok(Info::Raster(Box::new(lazy_raster_info(&mut r?, options)?)));
+        return Ok(Info::Raster(Box::new(lazy_raster_info_at(&mut r?, options, Some(path))?)));
     }
     #[cfg(feature = "pointcloud")]
     if crate::pointcloud::is_point_cloud_path(path) {

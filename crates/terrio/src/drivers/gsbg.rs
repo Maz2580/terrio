@@ -16,9 +16,12 @@ pub(crate) fn is_gsbg(path: &Path) -> bool {
     std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b)).is_ok() && &b == b"DSBB"
 }
 
-/// Reads a Surfer 6 binary grid. Rows are stored bottom-up; coordinates are cell centres.
-pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
-    let b = std::fs::read(path)?;
+/// Opens a Surfer 6 binary grid, reading only its header now: its pixels are read by window. Rows
+/// are stored bottom-up; coordinates are cell centres.
+pub(crate) fn open(path: &Path) -> Result<common::RawRaster> {
+    // The header: the tag, the grid size, its extent and its value range.
+    let mut b = Vec::with_capacity(56);
+    std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(path)?, 56), &mut b)?;
     if b.len() < 56 || &b[..4] != b"DSBB" {
         return Err(Error::InvalidData(format!("{}: not a Surfer 6 binary grid", path.display())));
     }
@@ -35,13 +38,12 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
         offset: 56,
         bottom_up: true,
     };
-    let data = common::decode(&b, &layout)?;
     let dx = (xhi - xlo) / (nx as f64 - 1.0);
     let dy = (ylo - yhi) / (ny as f64 - 1.0);
     let gt = [xlo - dx / 2.0, dx, 0.0, yhi - dy / 2.0, 0.0, dy];
     let crs = common::read_prj(path).unwrap_or_default();
-    let raster = common::make_raster(nx, ny, 1, data, gt, crs, Some(BLANK as f64))?;
-    Ok(RasterDataset::with_driver(raster, RasterDriver::GSBG, true))
+    let raster = common::raster_header(nx, ny, 1, DataType::F32, gt, crs, Some(BLANK as f64))?;
+    common::RawRaster::open(RasterDataset::with_driver(raster, RasterDriver::GSBG, true), path, layout, &[])
 }
 
 /// Writes a Surfer 6 binary grid (Float32), with nodata cells blanked.

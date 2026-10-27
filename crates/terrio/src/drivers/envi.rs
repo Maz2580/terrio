@@ -1,7 +1,7 @@
 //! ENVI labelled rasters: a raw data file with a `.hdr` text header. Opened through either file,
 //! as GDAL opens the data file.
 
-use super::common::{self, Interleave, Layout};
+use super::common::{self, Interleave, Layout, RawRaster};
 use crate::formats::RasterDriver;
 use crate::{Error, RasterDataset, Result};
 use std::path::{Path, PathBuf};
@@ -70,8 +70,9 @@ fn parse_header(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Reads an ENVI raster through its data file or its header.
-pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
+/// Opens an ENVI raster through its data file or its header, reading only the header now: its
+/// pixels are read by window.
+pub(crate) fn open(path: &Path) -> Result<RawRaster> {
     let header = header_path(path).ok_or_else(|| Error::InvalidData(format!("{}: no ENVI header", path.display())))?;
     let data = if header == path { data_path(&header)? } else { path.to_path_buf() };
     let h = parse_header(&std::fs::read_to_string(&header)?);
@@ -105,17 +106,16 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
         offset: num("header offset").unwrap_or(0),
         bottom_up: false,
     };
-    let pixels = common::decode(&std::fs::read(&data)?, &layout)?;
     let nodata = get("data ignore value").and_then(common::parse_f64);
     let (gt, map_crs) = get("map info").and_then(parse_map_info).unwrap_or((common::NO_GEOTRANSFORM, None));
     let crs = get("coordinate system string").and_then(common::crs_from_text).or(map_crs).unwrap_or_default();
-    let mut raster = common::make_raster(layout.cols, layout.rows, layout.bands, pixels, gt, crs, nodata)?;
+    let mut raster = common::raster_header(layout.cols, layout.rows, layout.bands, data_type, gt, crs, nodata)?;
     if let Some(names) = get("band names") {
         for (i, name) in names.split(',').map(str::trim).filter(|n| !n.is_empty()).enumerate() {
             raster.metadata.push((format!("band_{}_name", i + 1), name.to_string()));
         }
     }
-    Ok(RasterDataset::with_driver(raster, RasterDriver::ENVI, nodata.is_some()))
+    RawRaster::open(RasterDataset::with_driver(raster, RasterDriver::ENVI, nodata.is_some()), &data, layout, &[&header])
 }
 
 /// The geotransform and (for UTM and geographic grids) CRS of a `map info` value.
@@ -259,7 +259,7 @@ mod tests {
         let p = dir.path().join("x.envi");
         write(&r, Some(7.0), &p).unwrap();
         for open in [p.clone(), dir.path().join("x.hdr")] {
-            let ds = read(&open).unwrap();
+            let ds = super::open(&open).and_then(common::RawRaster::read).unwrap();
             assert_eq!(ds.raster.data_u16().unwrap(), &data[..]);
             assert_eq!(ds.nodata(), Some(7.0));
             assert_eq!(ds.crs().epsg, Some(32611));

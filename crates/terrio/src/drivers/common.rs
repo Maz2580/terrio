@@ -2,7 +2,7 @@
 //! files, and building rasters.
 
 use crate::crs::SpatialRef;
-use crate::{Error, Result};
+use crate::{Error, RasterDataset, Result};
 use std::path::{Path, PathBuf};
 use wbraster::raster::RasterData;
 use wbraster::{CrsInfo, DataType, Raster, RasterConfig};
@@ -114,6 +114,229 @@ pub(crate) fn encode(r: &Raster, l: &Layout) -> Vec<u8> {
     out
 }
 
+/// A raw raster opened for its header: the dataset without pixels, and its samples' layout and
+/// file, from which a window reads only the rows it covers.
+pub(crate) struct RawRaster {
+    /// The dataset without pixels.
+    pub header: RasterDataset,
+    window: RawWindow,
+}
+
+/// Where the samples of a raw raster are read from.
+enum RawSource {
+    File(PathBuf),
+    #[cfg(remote)]
+    Http(crate::http::RangeReader),
+}
+
+/// A raw raster read by window, as GDAL's raw drivers read it: each row of each band a window
+/// covers is read at its offset in the data file, rows next to each other in one read.
+struct RawWindow {
+    source: RawSource,
+    layout: Layout,
+    /// The band stored for each band of the dataset, numbered from 0, when they differ (Idrisi
+    /// RGB24 stores blue first).
+    stored_bands: Option<Vec<usize>>,
+    /// The local files the raster is read from: its header and data files.
+    inputs: Vec<String>,
+}
+
+/// The most bytes read at once: rows next to each other are read together up to this size, so
+/// that a whole raster is read without holding its file in memory.
+const RAW_READ_BYTES: usize = 16 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// The bytes of raw data files read by this thread, for tests.
+    pub(crate) static RAW_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+impl RawRaster {
+    /// A raw raster whose samples are in `data` with `layout`, described by `header` (a dataset
+    /// without pixels), read from the files `inputs` besides `data`. Fails, as reading it whole
+    /// would, when the file is too short to hold the samples.
+    pub(crate) fn open(header: RasterDataset, data: &Path, layout: Layout, inputs: &[&Path]) -> Result<Self> {
+        check_len(&layout, std::fs::metadata(data)?.len())?;
+        let mut files: Vec<String> =
+            std::iter::once(data).chain(inputs.iter().copied()).map(|p| p.to_string_lossy().into_owned()).collect();
+        files.dedup();
+        let source = RawSource::File(data.to_path_buf());
+        Ok(Self { header, window: RawWindow { source, layout, stored_bands: None, inputs: files } })
+    }
+
+    /// A raw raster whose samples are in a remote file, read with range requests.
+    #[cfg(remote)]
+    pub(crate) fn open_remote(header: RasterDataset, reader: crate::http::RangeReader, layout: Layout) -> Result<Self> {
+        check_len(&layout, reader.len())?;
+        Ok(Self { header, window: RawWindow { source: RawSource::Http(reader), layout, stored_bands: None, inputs: Vec::new() } })
+    }
+
+    /// The band stored for each band of the dataset, numbered from 0.
+    pub(crate) fn with_stored_bands(mut self, bands: Vec<usize>) -> Self {
+        self.window.stored_bands = Some(bands);
+        self
+    }
+
+    /// Reads every sample: the dataset as read whole.
+    pub(crate) fn read(self) -> Result<RasterDataset> {
+        let mut ds = self.header;
+        let l = &self.window.layout;
+        let all: Vec<usize> = (1..=l.bands).collect();
+        ds.raster.data = self.window.read_window(crate::Window { x: 0, y: 0, width: l.cols, height: l.rows }, &all)?;
+        Ok(ds)
+    }
+
+    /// The raster to be read by window.
+    pub(crate) fn into_lazy(self) -> crate::LazyRaster {
+        crate::LazyRaster::from_source(self.header, Box::new(self.window))
+    }
+}
+
+/// Fails, as [`decode`] does, when a file of `len` bytes is too short for a layout's samples.
+fn check_len(l: &Layout, len: u64) -> Result<()> {
+    let too_large = || Error::InvalidData(format!("{} x {} x {} samples are too many", l.cols, l.rows, l.bands));
+    let n = l.cols.checked_mul(l.rows).and_then(|n| n.checked_mul(l.bands)).ok_or_else(too_large)?;
+    let bytes = n.checked_mul(l.data_type.size_bytes()).ok_or_else(too_large)? as u64;
+    let body = len.saturating_sub(l.offset as u64);
+    if body < bytes {
+        return Err(Error::InvalidData(format!("expected {bytes} bytes of pixels, found {body}")));
+    }
+    Ok(())
+}
+
+impl RawWindow {
+    /// Reads a window of some bands (numbered from 1), band after band.
+    fn read_window(&self, window: crate::Window, bands: &[usize]) -> Result<RasterData> {
+        let l = &self.layout;
+        let size = l.data_type.size_bytes();
+        let n = window.width * window.height * bands.len();
+        // The samples of a row of the window are `stride` samples apart in the file.
+        let stride = if l.interleave == Interleave::Bip { l.bands } else { 1 };
+        let span = if window.width == 0 { 0 } else { ((window.width - 1) * stride + 1) * size };
+        // Each row of each band read: its offset in the file and in the window, in file order.
+        let mut rows = Vec::with_capacity(window.height * bands.len());
+        for (i, &b) in bands.iter().enumerate() {
+            let stored = self.stored_bands.as_ref().and_then(|s| s.get(b - 1).copied()).unwrap_or(b - 1);
+            for r in 0..window.height {
+                let row = window.y + r;
+                let file_row = if l.bottom_up { l.rows - 1 - row } else { row };
+                let sample = l.interleave.index(stored, file_row, window.x, l.cols, l.rows, l.bands);
+                rows.push((l.offset as u64 + (sample * size) as u64, (i * window.height + r) * window.width));
+            }
+        }
+        rows.sort_unstable();
+        macro_rules! go {
+            ($t:ty, $v:ident) => {{
+                let mut out: Vec<$t> = vec![Default::default(); n];
+                if span > 0 {
+                    self.for_each_row(&rows, span, |bytes, at| {
+                        for (k, v) in out[at..at + window.width].iter_mut().enumerate() {
+                            let i = k * stride * size;
+                            let a: [u8; size_of::<$t>()] = bytes[i..i + size].try_into().unwrap_or_default();
+                            *v = if l.little_endian { <$t>::from_le_bytes(a) } else { <$t>::from_be_bytes(a) };
+                        }
+                    })?;
+                }
+                RasterData::$v(out)
+            }};
+        }
+        Ok(typed!(l.data_type, go))
+    }
+
+    /// Reads the rows `(offset, index)` (sorted by offset) of `span` bytes each, calling `f` with
+    /// each row's bytes and index: rows next to each other in one read, up to `RAW_READ_BYTES`.
+    fn for_each_row(&self, rows: &[(u64, usize)], span: usize, mut f: impl FnMut(&[u8], usize)) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        // Runs of rows that follow one another (or overlap, as the bands of a BIP row do).
+        let mut runs = Vec::new();
+        let mut i = 0;
+        while i < rows.len() {
+            let start = rows[i].0;
+            let mut end = start + span as u64;
+            let mut j = i + 1;
+            while j < rows.len() && rows[j].0 <= end && rows[j].0 + span as u64 - start <= RAW_READ_BYTES as u64 {
+                end = end.max(rows[j].0 + span as u64);
+                j += 1;
+            }
+            runs.push((i..j, start, end));
+            i = j;
+        }
+        let mut reader: Box<dyn ReadSeek> = match &self.source {
+            RawSource::File(p) => Box::new(std::fs::File::open(p)?),
+            #[cfg(remote)]
+            RawSource::Http(r) => Box::new(r.clone()),
+        };
+        let mut fetched = 0;
+        let mut buf = Vec::new();
+        for (k, (range, start, end)) in runs.iter().cloned().enumerate() {
+            if k >= fetched {
+                fetched = self.prefetch(&runs[k..])? + k;
+            }
+            buf.resize((end - start) as usize, 0);
+            reader.seek(SeekFrom::Start(start))?;
+            reader.read_exact(&mut buf)?;
+            #[cfg(test)]
+            RAW_BYTES_READ.with(|c| c.set(c.get() + buf.len() as u64));
+            for &(offset, at) in &rows[range] {
+                let o = (offset - start) as usize;
+                f(&buf[o..o + span], at);
+            }
+        }
+        Ok(())
+    }
+
+    /// Fetches the blocks of a remote file's next runs, over up to `RAW_READ_BYTES`, together
+    /// (runs a few blocks apart in one request) before they are read. Returns how many runs it
+    /// fetched: all of them for a local file.
+    fn prefetch(&self, runs: &[(std::ops::Range<usize>, u64, u64)]) -> Result<usize> {
+        #[cfg(remote)]
+        if let RawSource::Http(r) = &self.source {
+            let start = runs.first().map_or(0, |(_, s, _)| *s);
+            let next = runs.iter().take_while(|(_, _, e)| e - start <= RAW_READ_BYTES as u64).count().max(1);
+            let ranges: Vec<(u64, u64)> = runs[..next].iter().map(|(_, s, e)| (*s, e - s)).collect();
+            r.prefetch(&ranges)?;
+            return Ok(next);
+        }
+        Ok(runs.len())
+    }
+}
+
+trait ReadSeek: std::io::Read + std::io::Seek {}
+impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
+
+impl crate::cog::WindowSource for RawWindow {
+    fn overviews(&self) -> Vec<(usize, usize)> {
+        Vec::new()
+    }
+
+    /// A row, as GDAL's raw drivers' blocks.
+    fn block_size(&self) -> Option<(usize, usize)> {
+        Some((self.layout.cols, 1))
+    }
+
+    fn input_paths(&self) -> Result<Vec<String>> {
+        Ok(self.inputs.clone())
+    }
+
+    fn streamed(&self) -> Option<&dyn crate::cog::StreamedSource> {
+        Some(self)
+    }
+
+    fn read(&mut self, _level: usize, window: crate::Window, bands: &[usize]) -> Result<RasterData> {
+        self.read_window(window, bands)
+    }
+}
+
+impl crate::cog::StreamedSource for RawWindow {
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.clone()
+    }
+
+    fn read_rows(&self, window: crate::Window, bands: &[usize]) -> Result<RasterData> {
+        self.read_window(window, bands)
+    }
+}
+
 /// Builds a raster from band-major data and a north-up GDAL geotransform.
 pub(crate) fn make_raster(
     cols: usize,
@@ -124,10 +347,61 @@ pub(crate) fn make_raster(
     crs: CrsInfo,
     nodata: Option<f64>,
 ) -> Result<Raster> {
+    let cfg = raster_config(cols, rows, bands, data.data_type(), gt, crs, nodata)?;
+    let mut r = crate::pixel::raster_from_data(cfg, data)?;
+    // A south-up grid (positive pixel height) keeps its origin at the top.
+    if gt[5] > 0.0 {
+        r.y_min = gt[3];
+    }
+    Ok(r)
+}
+
+/// The raster [`make_raster`] builds from samples of `data_type`, without them: its data buffer
+/// is empty.
+pub(crate) fn raster_header(
+    cols: usize,
+    rows: usize,
+    bands: usize,
+    data_type: DataType,
+    gt: [f64; 6],
+    crs: CrsInfo,
+    nodata: Option<f64>,
+) -> Result<Raster> {
+    if bands == 0 {
+        // The error (or empty raster) of a raster without bands.
+        return make_raster(cols, rows, 0, RasterData::new_filled(data_type, 0, 0.0), gt, crs, nodata);
+    }
+    let cfg = raster_config(cols, rows, bands, data_type, gt, crs, nodata)?;
+    Ok(Raster {
+        cols: cfg.cols,
+        rows: cfg.rows,
+        bands: cfg.bands,
+        x_min: cfg.x_min,
+        // A south-up grid (positive pixel height) keeps its origin at the top.
+        y_min: if gt[5] > 0.0 { gt[3] } else { cfg.y_min },
+        cell_size_x: cfg.cell_size,
+        cell_size_y: gt[5].abs(),
+        nodata: cfg.nodata,
+        data_type,
+        crs: cfg.crs,
+        metadata: cfg.metadata,
+        data: RasterData::new_filled(data_type, 0, 0.0),
+    })
+}
+
+fn raster_config(
+    cols: usize,
+    rows: usize,
+    bands: usize,
+    data_type: DataType,
+    gt: [f64; 6],
+    crs: CrsInfo,
+    nodata: Option<f64>,
+) -> Result<RasterConfig> {
     if gt[2] != 0.0 || gt[4] != 0.0 {
         return Err(Error::Unsupported("rotated geotransforms are not supported".into()));
     }
-    let cfg = RasterConfig {
+    Ok(RasterConfig {
         cols,
         rows,
         bands,
@@ -136,16 +410,10 @@ pub(crate) fn make_raster(
         cell_size: gt[1],
         cell_size_y: Some(gt[5].abs()),
         nodata: nodata.unwrap_or(-9999.0),
-        data_type: data.data_type(),
+        data_type,
         crs,
         metadata: Vec::new(),
-    };
-    let mut r = crate::pixel::raster_from_data(cfg, data)?;
-    // A south-up grid (positive pixel height) keeps its origin at the top.
-    if gt[5] > 0.0 {
-        r.y_min = gt[3];
-    }
-    Ok(r)
+    })
 }
 
 /// A raster's data converted to another type (values rounded and saturated for integers).
@@ -594,6 +862,78 @@ mod tests {
                 let RasterData::I16(back) = decode(&bytes, &l).unwrap() else { panic!() };
                 assert_eq!(back, data);
             }
+        }
+    }
+
+    #[test]
+    fn raw_windows_read_the_rows_they_cover() {
+        let (cols, rows, bands) = (7, 5, 3);
+        let data: Vec<i16> = (0..cols * rows * bands).map(|i| i as i16 * 3 - 50).collect();
+        let gt = [10.0, 1.0, 0.0, 20.0, 0.0, -1.0];
+        let r = make_raster(cols, rows, bands, RasterData::I16(data.clone()), gt, CrsInfo::default(), None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw.bin");
+        for interleave in [Interleave::Bsq, Interleave::Bil, Interleave::Bip] {
+            for (little, bottom_up) in [(true, false), (false, true)] {
+                let l = Layout { cols, rows, bands, data_type: DataType::I16, little_endian: little, interleave, offset: 5, bottom_up };
+                std::fs::write(&path, encode(&r, &l)).unwrap();
+                let open = || {
+                    let header = raster_header(cols, rows, bands, DataType::I16, gt, CrsInfo::default(), None).unwrap();
+                    RawRaster::open(RasterDataset::with_driver(header, crate::formats::RasterDriver::EHdr, false), &path, l, &[]).unwrap()
+                };
+                // Read whole, as `decode` reads it.
+                let RasterData::I16(whole) = open().read().unwrap().raster.data else { panic!() };
+                assert_eq!(whole, data, "{interleave:?}");
+                let mut lazy = open().into_lazy();
+                for (x, y, w, h) in [(0, 0, cols, rows), (2, 1, 3, 2), (6, 4, 1, 1), (0, 3, cols, 2)] {
+                    for wanted in [vec![1, 2, 3], vec![3, 1], vec![2]] {
+                        let options = crate::WindowOptions { bands: wanted.clone(), overview: None };
+                        let RasterData::I16(got) = lazy.read_window(crate::Window::new(x, y, w, h), &options).unwrap().raster.data else {
+                            panic!()
+                        };
+                        let want: Vec<i16> = wanted
+                            .iter()
+                            .flat_map(|b| (y..y + h).flat_map(move |row| (x..x + w).map(move |c| ((b - 1) * rows + row) * cols + c)))
+                            .map(|i| data[i])
+                            .collect();
+                        assert_eq!(got, want, "{interleave:?} {little} {bottom_up} {x},{y} {w}x{h} {wanted:?}");
+                    }
+                }
+                // A band sequential window reads its samples and nothing else.
+                if interleave == Interleave::Bsq {
+                    let before = RAW_BYTES_READ.with(|c| c.get());
+                    lazy.read_window(crate::Window::new(2, 1, 3, 2), &crate::WindowOptions { bands: vec![2], overview: None }).unwrap();
+                    assert_eq!(RAW_BYTES_READ.with(|c| c.get()) - before, 3 * 2 * 2);
+                }
+            }
+        }
+        // A file too short for its samples fails to open, as it fails to be read whole.
+        let l = Layout {
+            cols,
+            rows,
+            bands,
+            data_type: DataType::I16,
+            little_endian: true,
+            interleave: Interleave::Bsq,
+            offset: 0,
+            bottom_up: false,
+        };
+        std::fs::write(&path, [0u8; 10]).unwrap();
+        let header = raster_header(cols, rows, bands, DataType::I16, gt, CrsInfo::default(), None).unwrap();
+        let err =
+            RawRaster::open(RasterDataset::with_driver(header, crate::formats::RasterDriver::EHdr, false), &path, l, &[]).err().unwrap();
+        assert_eq!(err.to_string(), decode(&[0u8; 10], &l).unwrap_err().to_string());
+    }
+
+    #[test]
+    fn raster_headers_are_rasters_without_samples() {
+        for gt in [[10.0, 2.0, 0.0, 20.0, 0.0, -3.0], [10.0, 2.0, 0.0, 20.0, 0.0, 3.0]] {
+            let crs = CrsInfo::from_epsg(4326);
+            let full = make_raster(4, 3, 2, RasterData::F32(vec![1.0; 24]), gt, crs.clone(), Some(-1.0)).unwrap();
+            let mut header = raster_header(4, 3, 2, DataType::F32, gt, crs, Some(-1.0)).unwrap();
+            assert_eq!(header.data.len(), 0);
+            header.data = full.data.clone();
+            assert_eq!(format!("{header:?}"), format!("{full:?}"));
         }
     }
 }

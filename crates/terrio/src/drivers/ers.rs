@@ -1,6 +1,6 @@
 //! ER Mapper rasters: a `.ers` text header and a band-interleaved-by-line data file.
 
-use super::common::{self, Interleave, Layout};
+use super::common::{self, Interleave, Layout, RawRaster};
 use crate::formats::RasterDriver;
 use crate::{Error, RasterDataset, Result};
 use std::path::{Path, PathBuf};
@@ -69,8 +69,9 @@ fn crs_from_erm(projection: &str, datum: &str) -> Option<CrsInfo> {
     None
 }
 
-/// Reads an ER Mapper raster through its `.ers` header.
-pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
+/// Opens an ER Mapper raster through its `.ers` header, reading only the header now: its pixels
+/// are read by window.
+pub(crate) fn open(path: &Path) -> Result<RawRaster> {
     let h = parse(&std::fs::read_to_string(path)?);
     let get = |k: &str| h.iter().find(|(key, _)| key.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
     let int = |k: &str| get(k).and_then(|v| v.parse::<usize>().ok());
@@ -100,7 +101,6 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
         Some(f) => path.with_file_name(f),
         None => data_path(path),
     };
-    let pixels = common::decode(&std::fs::read(&data_file)?, &layout)?;
     let f = |k: &str| get(k).and_then(common::parse_f64);
     let (xd, yd) = (f("rasterinfo.cellinfo.xdimension").unwrap_or(1.0), f("rasterinfo.cellinfo.ydimension").unwrap_or(1.0));
     let origin = match (f("rasterinfo.registrationcoord.eastings"), f("rasterinfo.registrationcoord.northings")) {
@@ -122,8 +122,8 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
     let crs = crs_from_erm(get("coordinatespace.projection").unwrap_or("RAW"), get("coordinatespace.datum").unwrap_or("WGS84"))
         .unwrap_or_default();
     let nodata = f("rasterinfo.nullcellvalue");
-    let raster = common::make_raster(layout.cols, layout.rows, layout.bands, pixels, gt, crs, nodata)?;
-    Ok(RasterDataset::with_driver(raster, RasterDriver::ERS, nodata.is_some()))
+    let raster = common::raster_header(layout.cols, layout.rows, layout.bands, data_type, gt, crs, nodata)?;
+    RawRaster::open(RasterDataset::with_driver(raster, RasterDriver::ERS, nodata.is_some()), &data_file, layout, &[path])
 }
 
 /// The data file of a header: the header's path without its extension.

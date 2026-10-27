@@ -1,13 +1,14 @@
 //! Idrisi / TerrSet rasters: a `.rst` data file with a `.rdc` text header.
 
-use super::common::{self, Interleave, Layout};
+use super::common::{self, Interleave, Layout, RawRaster};
 use crate::formats::RasterDriver;
 use crate::{Error, RasterDataset, Result};
 use std::path::Path;
 use wbraster::{CrsInfo, DataType, Raster};
 
-/// Reads an Idrisi raster through its `.rst` or `.rdc` file.
-pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
+/// Opens an Idrisi raster through its `.rst` or `.rdc` file, reading only the `.rdc` header now:
+/// its pixels are read by window.
+pub(crate) fn open(path: &Path) -> Result<RawRaster> {
     let rdc = common::sibling(path, "rdc");
     let data = common::sibling(path, "rst");
     let text = std::fs::read_to_string(&rdc)?;
@@ -30,14 +31,6 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
     let (cols, rows) = (int("columns").ok_or_else(|| bad("columns"))?, int("rows").ok_or_else(|| bad("rows"))?);
     // RGB24 is stored blue, green, red by pixel.
     let layout = Layout { cols, rows, bands, data_type, little_endian: true, interleave: Interleave::Bip, offset: 0, bottom_up: false };
-    let mut pixels = common::decode(&std::fs::read(&data)?, &layout)?;
-    if bands == 3
-        && let wbraster::raster::RasterData::U8(v) = &mut pixels
-    {
-        let n = cols * rows;
-        let (blue, rest) = v.split_at_mut(n);
-        blue.swap_with_slice(&mut rest[n..]);
-    }
     let (x0, x1, y0, y1) = (
         num("min. x").unwrap_or(0.0),
         num("max. x").unwrap_or(cols as f64),
@@ -56,8 +49,10 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
             (refsys.is_empty() && metres).then(|| CrsInfo { epsg: None, wkt: Some(LOCAL_METRES.to_string()), proj4: None })
         })
         .unwrap_or_default();
-    let raster = common::make_raster(cols, rows, bands, pixels, gt, crs, nodata)?;
-    Ok(RasterDataset::with_driver(raster, RasterDriver::RST, nodata.is_some()))
+    let raster = common::raster_header(cols, rows, bands, data_type, gt, crs, nodata)?;
+    let raw = RawRaster::open(RasterDataset::with_driver(raster, RasterDriver::RST, nodata.is_some()), &data, layout, &[&rdc])?;
+    // RGB24 is stored blue, green, red by pixel.
+    Ok(if bands == 3 { raw.with_stored_bands(vec![2, 1, 0]) } else { raw })
 }
 
 /// The local CRS GDAL reads for an unnamed Idrisi reference system in metres.

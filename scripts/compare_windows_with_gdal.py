@@ -1,14 +1,16 @@
-"""Compare terrio's windowed and overview reads of GeoTIFFs and JPEG 2000 files with GDAL's,
-locally and over HTTP.
+"""Compare terrio's windowed and overview reads of GeoTIFFs, JPEG 2000 files and raw-layout rasters
+with GDAL's, locally and over HTTP.
 
 Usage:
     python scripts/compare_windows_with_gdal.py local DATA_DIR
     python scripts/compare_windows_with_gdal.py remote
 
 ``local`` reads windows of every level (full resolution and each overview) of every ``.tif`` and
-``.jp2`` in DATA_DIR (and of the tiled JPEG XL COGs of ``gtiff_codecs``) with ``terrio convert
---srcwin ... --overview N`` and with GDAL, and checks that the pixels are identical; the resolution
-levels of JPEG 2000 files are their overviews, as in GDAL's JP2OpenJPEG driver. ``remote`` does
+``.jp2`` in DATA_DIR (and of the tiled JPEG XL COGs of ``gtiff_codecs``), and of every raw-layout
+raster (SRTM tiles, EHdr, ENVI, SAGA, ERS, Idrisi and Surfer grids, read row by row), with
+``terrio convert --srcwin ... --overview N`` and with GDAL, and checks that the pixels are
+identical; the resolution levels of JPEG 2000 files are their overviews, as in GDAL's JP2OpenJPEG
+driver. ``remote`` does
 the same on public Cloud Optimized GeoTIFFs (Sentinel-2 L2A, a USGS 3DEP tile and a Copernicus DEM
 tile) and a Sentinel-2 L1C JPEG 2000 band, and reports the requests, bytes and time each tool
 takes for ``info`` and for a 512 x 512 window read, from a fresh process.
@@ -211,8 +213,30 @@ def level_windows(w, h):
     return sorted({(0, 0, s, s), (w - s, h - s, s, s), ((w - s) // 2, (h - s) // 3, s, max(1, s // 2)), (w - 1, 0, 1, h)})
 
 
+# The raw-layout rasters of the test data, read by window row by row. `.img` files are ENVI data
+# files when an ENVI `.hdr` is next to them (they are ERDAS Imagine files otherwise).
+RAW_EXTENSIONS = (".hgt", ".bil", ".flt", ".envi", ".sdat", ".ers", ".rst", ".grd")
+
+
+def is_raw(data_dir, name):
+    """Whether a file of the test data is a raw-layout raster.
+
+    Args:
+        data_dir: The directory.
+        name: The file name.
+
+    Returns:
+        True for the raw-layout rasters terrio reads row by row.
+    """
+    if name.endswith(RAW_EXTENSIONS):
+        return True
+    hdr = os.path.join(data_dir, os.path.splitext(name)[0] + ".hdr")
+    return name.endswith(".img") and os.path.isfile(hdr) and open(hdr, "rb").read(4) == b"ENVI"
+
+
 def compare_local(data_dir):
-    """Compare windows of every level of every GeoTIFF in a directory.
+    """Compare windows of every level of every GeoTIFF, JPEG 2000 file and raw-layout raster in a
+    directory.
 
     Args:
         data_dir: The directory.
@@ -221,7 +245,7 @@ def compare_local(data_dir):
         The number of windows that differ.
     """
     failures = 0
-    names = [n for n in sorted(os.listdir(data_dir)) if n.endswith((".tif", ".jp2"))]
+    names = [n for n in sorted(os.listdir(data_dir)) if n.endswith((".tif", ".jp2")) or is_raw(data_dir, n)]
     codecs = os.path.join(data_dir, "gtiff_codecs")
     if os.path.isdir(codecs):
         names += [f"gtiff_codecs/{n}" for n in sorted(os.listdir(codecs)) if n.endswith("_jxl_cog.tif")]

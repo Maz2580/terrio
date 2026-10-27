@@ -1,13 +1,14 @@
 //! SAGA binary grids: a `.sdat` data file and a `.sgrd` header (with a `.prj` CRS).
 
-use super::common::{self, Interleave, Layout};
+use super::common::{self, Interleave, Layout, RawRaster};
 use crate::formats::RasterDriver;
 use crate::{Error, RasterDataset, Result};
 use std::path::Path;
 use wbraster::{DataType, Raster};
 
-/// Reads a SAGA grid through its `.sdat` or `.sgrd` file.
-pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
+/// Opens a SAGA grid through its `.sdat` or `.sgrd` file, reading only the `.sgrd` header now: its
+/// pixels are read by window.
+pub(crate) fn open(path: &Path) -> Result<RawRaster> {
     let header = common::sibling(path, "sgrd");
     let data = common::sibling(path, "sdat");
     let text = std::fs::read_to_string(&header)?;
@@ -38,15 +39,14 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
         offset: int("DATAFILE_OFFSET").unwrap_or(0),
         bottom_up: !get("TOPTOBOTTOM").is_some_and(|v| v.eq_ignore_ascii_case("TRUE")),
     };
-    let pixels = common::decode(&std::fs::read(&data)?, &layout)?;
     let cell = num("CELLSIZE").ok_or_else(|| bad("CELLSIZE"))?;
     let (xmin, ymin) = (num("POSITION_XMIN").unwrap_or(0.0), num("POSITION_YMIN").unwrap_or(0.0));
     // POSITION_XMIN/YMIN are the centre of the lower-left cell.
     let gt = [xmin - cell / 2.0, cell, 0.0, ymin - cell / 2.0 + cell * rows as f64, 0.0, -cell];
     let nodata = num("NODATA_VALUE");
     let crs = common::read_prj(&data).unwrap_or_default();
-    let raster = common::make_raster(cols, rows, 1, pixels, gt, crs, nodata)?;
-    Ok(RasterDataset::with_driver(raster, RasterDriver::SAGA, nodata.is_some()))
+    let raster = common::raster_header(cols, rows, 1, data_type, gt, crs, nodata)?;
+    RawRaster::open(RasterDataset::with_driver(raster, RasterDriver::SAGA, nodata.is_some()), &data, layout, &[&header])
 }
 
 /// Writes a SAGA grid: `.sdat`, `.sgrd` and `.prj`, bottom-up as GDAL writes them.

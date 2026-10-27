@@ -4,8 +4,9 @@
 //! GeoTIFFs (Cloud Optimized or not, local or remote) are read in place: opening reads the image
 //! headers, and a window read decodes only the tiles or strips that intersect the window. Remote
 //! files are read through HTTP range requests (see [`crate::http`]), fetching the tiles of a window
-//! in as few requests as possible. Other formats are read whole on open, then windows are cut from
-//! memory.
+//! in as few requests as possible. Raw-layout rasters (SRTM tiles, EHdr, ENVI, SAGA, ERS, Idrisi and
+//! Surfer 6 grids), JPEG 2000, GRIB and Zarr are read in place by their own drivers too. Other
+//! formats are read whole on open, then windows are cut from memory.
 //!
 //! ```no_run
 //! use terrio::{Window, WindowOptions};
@@ -340,7 +341,9 @@ impl LazyRaster {
 
     /// Opens a raster: a path, URL, `s3://`, `gs://` or `az://` object, or zip archive member.
     ///
-    /// GeoTIFFs are read in place: only their headers are read now. Other formats are read whole.
+    /// GeoTIFFs are read in place: only their headers are read now. So are raw-layout rasters (SRTM
+    /// tiles, EHdr, ENVI, SAGA, ERS, Idrisi and Surfer 6 grids), JPEG 2000, GRIB and Zarr; other
+    /// formats are read whole.
     pub fn open(path: &str) -> Result<Self> {
         let mut r = Self::open_without_sidecars(path)?;
         r.find_sidecar_mask(path);

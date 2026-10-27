@@ -5,7 +5,7 @@
 //! `.num`, `.raw`, `.swb`) are read; zipped tiles (`N37W120.hgt.zip`) are opened through the
 //! archive.
 
-use super::common::{self, Interleave, Layout};
+use super::common::{self, Interleave, Layout, RawRaster};
 use crate::formats::RasterDriver;
 use crate::{Error, RasterDataset, Result};
 use std::io::Read;
@@ -84,23 +84,56 @@ pub(crate) fn is_hgt(path: &Path) -> bool {
 /// Reads an SRTM tile, georeferenced as GDAL does: WGS 84, cell centres on whole degrees at the
 /// tile's edges (`AREA_OR_POINT=Point`), with -32768 as nodata except for Byte (water body) tiles.
 pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
+    open(path)?.read()
+}
+
+/// Opens an SRTM tile as [`read`] reads it, reading nothing of it now (the file's name and size
+/// make its header): its pixels are read by window.
+pub(crate) fn open(path: &Path) -> Result<RawRaster> {
     let bad = || Error::InvalidData(format!("{}: not an SRTM HGT tile", path.display()));
     let (name, ext) = name_and_extension(path).ok_or_else(bad)?;
-    let (lat, lon) = tile_origin(name).ok_or_else(bad)?;
-    let (cols, rows, data_type) = grid(std::fs::metadata(path)?.len()).ok_or_else(bad)?;
-    let bytes = std::fs::read(path)?;
+    let origin = tile_origin(name).ok_or_else(bad)?;
+    let grid = grid(std::fs::metadata(path)?.len()).ok_or_else(bad)?;
+    let (header, layout) = tile(origin, grid, &ext)?;
+    RawRaster::open(header, path, layout, &[])
+}
+
+/// Opens a remote SRTM tile for its header, to be read by window with range requests. `None` when
+/// the file is not named as a tile, or (having fetched its first block) is not one.
+#[cfg(remote)]
+pub(crate) fn open_remote(loc: &crate::vfs::Location) -> Option<Result<RawRaster>> {
+    let name = loc.file_name();
+    let (name, ext) = name_and_extension(Path::new(&name))?;
+    let origin = tile_origin(name)?;
+    if !EXTENSIONS.contains(&ext.as_str()) {
+        return None;
+    }
+    let reader = match crate::http::RangeReader::open(&loc.remote()?) {
+        Ok(r) => r,
+        Err(e) => return Some(Err(e)),
+    };
+    let grid = grid(reader.len())?;
+    let mut magic = [0u8; 15];
+    if std::io::Read::read_exact(&mut reader.clone(), &mut magic).is_ok() && &magic == b"EHFA_HEADER_TAG" {
+        return None;
+    }
+    Some(tile(origin, grid, &ext).and_then(|(header, layout)| RawRaster::open_remote(header, reader, layout)))
+}
+
+/// The dataset header (without pixels) and sample layout of a tile with its south-west corner at
+/// `(lat, lon)`, of `(cols, rows, type)`, with extension `ext`.
+fn tile((lat, lon): (i32, i32), (cols, rows, data_type): (usize, usize, DataType), ext: &str) -> Result<(RasterDataset, Layout)> {
     let layout = Layout { cols, rows, bands: 1, data_type, little_endian: false, interleave: Interleave::Bsq, offset: 0, bottom_up: false };
-    let data = common::decode(&bytes, &layout)?;
     let (dx, dy) = (1.0 / (cols - 1) as f64, 1.0 / (rows - 1) as f64);
     let gt = [lon as f64 - dx / 2.0, dx, 0.0, (lat + 1) as f64 + dy / 2.0, 0.0, -dy];
     let nodata = (data_type != DataType::U8).then_some(NODATA);
-    let mut raster = common::make_raster(cols, rows, 1, data, gt, CrsInfo::from_epsg(4326), nodata)?;
+    let mut raster = common::raster_header(cols, rows, 1, data_type, gt, CrsInfo::from_epsg(4326), nodata)?;
     raster.metadata.push(("AREA_OR_POINT".into(), "Point".into()));
     let mut ds = RasterDataset::with_driver(raster, RasterDriver::SRTMHGT, nodata.is_some());
     // Error, image and water body layers are not heights.
-    let unit = !matches!(ext.as_str(), "err" | "img" | "num" | "raw" | "swb");
+    let unit = !matches!(ext, "err" | "img" | "num" | "raw" | "swb");
     ds.band_metadata = vec![crate::BandMetadata { unit: unit.then(|| "m".into()), ..Default::default() }];
-    Ok(ds)
+    Ok((ds, layout))
 }
 
 /// Writes an SRTM tile as GDAL does: Int16 samples (values rounded and clamped), with nodata
@@ -214,6 +247,46 @@ mod tests {
         assert_eq!(ds.raster.get(0, 1200, 5), 1100.0);
         assert!(ds.raster.metadata.iter().any(|(k, v)| k == "AREA_OR_POINT" && v == "Point"));
         assert_eq!(ds.band_metadata[0].unit.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn reads_windows_of_a_tile_in_place() {
+        use crate::drivers::common::RAW_BYTES_READ;
+        let read = || RAW_BYTES_READ.with(|c| c.get());
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("S01W120.hgt");
+        std::fs::write(&p, tile_bytes()).unwrap();
+        let path = p.to_str().unwrap();
+        let whole = crate::open_raster(path).unwrap();
+
+        // Opening and summarizing read the file's size and name, not its samples.
+        let before = read();
+        let mut lazy = crate::open_raster_lazy(path).unwrap();
+        let crate::info::Info::Raster(info) = crate::info::info_path(path, &Default::default()).unwrap() else { panic!() };
+        assert_eq!(read(), before);
+        let eager = crate::info::raster_info(&whole, &Default::default());
+        assert_eq!(serde_json::to_value(&*info).unwrap(), serde_json::to_value(&eager).unwrap());
+        assert_eq!(lazy.header().band_metadata, whole.band_metadata);
+
+        // A window reads its rows' samples and nothing else: 2 bytes for each of 100 x 10 cells.
+        let window = crate::Window::new(600, 1190, 100, 10);
+        let w = lazy.read_window(window, &Default::default()).unwrap();
+        assert_eq!(read() - before, 100 * 10 * 2);
+        assert_eq!((w.raster.cols, w.raster.rows, w.raster.data_type, w.nodata()), (100, 10, DataType::I16, Some(-32768.0)));
+        assert_eq!((w.raster.get(0, 0, 0), w.raster.get(0, 9, 99)), (1090.0, 1099.0));
+        let gt = w.geo_transform();
+        let want = whole.geo_transform();
+        assert_eq!(gt, [want[0] + 600.0 * want[1], want[1], 0.0, want[3] + 1190.0 * want[5], 0.0, want[5]]);
+        assert_eq!(w.band_metadata, whole.band_metadata);
+        assert_eq!(w.raster.metadata, whole.raster.metadata);
+
+        // Read whole by window, as read eagerly.
+        let all = lazy.read().unwrap();
+        assert_eq!(all.raster.data.to_f64_vec(), whole.raster.data.to_f64_vec());
+        assert_eq!(
+            (all.raster.data_type, all.nodata(), all.geo_transform()),
+            (whole.raster.data_type, whole.nodata(), whole.geo_transform())
+        );
     }
 
     #[test]

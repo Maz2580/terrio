@@ -61,16 +61,10 @@ pub(crate) fn read(path: &str) -> Option<Result<RasterDataset>> {
 
 fn read_own(path: &str) -> Option<Result<RasterDataset>> {
     let p = Path::new(path);
+    if let Some(open) = raw_opener(path) {
+        return Some(open(p).and_then(common::RawRaster::read));
+    }
     let by_extension = RasterDriver::for_extension(path);
-    // Labelled raw rasters (a data file with a `.hdr`) use many extensions; the formats with
-    // extensions of their own are never sniffed as such.
-    let raw_candidate = matches!(by_extension, None | Some(RasterDriver::ENVI | RasterDriver::EHdr | RasterDriver::HFA));
-    if raw_candidate && envi::is_envi(p) {
-        return Some(envi::read(p));
-    }
-    if raw_candidate && ehdr::is_ehdr(p) {
-        return Some(ehdr::read(p));
-    }
     #[cfg(feature = "zarr")]
     if zarr::is_zarr(p) {
         return Some(zarr::read(p));
@@ -83,13 +77,6 @@ fn read_own(path: &str) -> Option<Result<RasterDataset>> {
     if by_extension.is_none() && netcdf::is_netcdf(p) {
         return Some(netcdf::read(p, None));
     }
-    if gsbg::is_gsbg(p) {
-        return Some(gsbg::read(p));
-    }
-    // SRTM tiles are known by their name and size, whatever their extension (`.raw`, `.img`...).
-    if hgt::is_hgt(p) {
-        return Some(hgt::read(p));
-    }
     #[cfg(feature = "grib")]
     if matches!(by_extension, None | Some(RasterDriver::GRIB)) && grib::is_grib_file(p) {
         return Some(grib::read(p));
@@ -100,10 +87,7 @@ fn read_own(path: &str) -> Option<Result<RasterDataset>> {
     }
     Some(match driver {
         RasterDriver::AAIGrid => aaigrid::read(p),
-        RasterDriver::ERS => ers::read(p),
-        RasterDriver::SAGA => saga::read(p),
         RasterDriver::XYZ => xyz::read(p),
-        RasterDriver::RST => rst::read(p),
         RasterDriver::PNG => png::read(p),
         RasterDriver::JPEG => png::read_jpeg(p),
         #[cfg(feature = "jp2")]
@@ -121,11 +105,79 @@ fn read_own(path: &str) -> Option<Result<RasterDataset>> {
     })
 }
 
-/// Opens a raster read by window with one of terrio's own drivers (Zarr stores, local or remote,
-/// read chunk by chunk; JPEG 2000 by tile and resolution level; GRIB by message). `None` when none of them reads
-/// the file so.
-#[cfg_attr(not(any(feature = "zarr", feature = "jp2", feature = "grib")), allow(unused_variables))]
+/// Opens a raster of a raw layout (the samples at fixed offsets in a data file) for its header.
+type RawOpener = fn(&Path) -> Result<common::RawRaster>;
+
+/// The raw-layout driver (EHdr, ENVI, ERS, GSBG, RST, SAGA, SRTMHGT) that reads a local file,
+/// found as `read_own` finds a file's driver: `None` when another driver reads it, so that a
+/// raster read whole and read by window are read by the same driver.
+fn raw_opener(path: &str) -> Option<RawOpener> {
+    let p = Path::new(path);
+    let by_extension = RasterDriver::for_extension(path);
+    // Labelled raw rasters (a data file with a `.hdr`) use many extensions; the formats with
+    // extensions of their own are never sniffed as such.
+    let raw_candidate = matches!(by_extension, None | Some(RasterDriver::ENVI | RasterDriver::EHdr | RasterDriver::HFA));
+    if raw_candidate && envi::is_envi(p) {
+        return Some(envi::open);
+    }
+    if raw_candidate && ehdr::is_ehdr(p) {
+        return Some(ehdr::open);
+    }
+    #[cfg(feature = "zarr")]
+    if zarr::is_zarr(p) {
+        return None;
+    }
+    #[cfg(feature = "netcdf-hdf5")]
+    if by_extension.is_none() && (hdf5::is_hdf5(p) || netcdf::is_netcdf(p)) {
+        return None;
+    }
+    if gsbg::is_gsbg(p) {
+        return Some(gsbg::open);
+    }
+    // SRTM tiles are known by their name and size, whatever their extension (`.raw`, `.img`...).
+    if hgt::is_hgt(p) {
+        return Some(hgt::open);
+    }
+    #[cfg(feature = "grib")]
+    if matches!(by_extension, None | Some(RasterDriver::GRIB)) && grib::is_grib_file(p) {
+        return None;
+    }
+    match by_extension? {
+        RasterDriver::ERS => Some(ers::open),
+        RasterDriver::SAGA => Some(saga::open),
+        RasterDriver::RST => Some(rst::open),
+        _ => None,
+    }
+}
+
+/// Opens a raw-layout raster for its header, to be read by window: a local file one of those
+/// drivers reads (see [`raw_opener`]), or a remote SRTM tile, read with range requests. `None`
+/// for other files.
+fn open_raw(path: &str) -> Option<Result<common::RawRaster>> {
+    use crate::vfs::Location;
+    match Location::parse(path) {
+        Location::Local(p) => {
+            let local = p.to_str()?;
+            let open = raw_opener(local)?;
+            Some(open(&p).map(|mut raw| {
+                nodata::apply_pam(local, &mut raw.header);
+                raw
+            }))
+        }
+        #[cfg(remote)]
+        loc @ (Location::Url(_) | Location::S3 { .. }) => hgt::open_remote(&loc),
+        _ => None,
+    }
+}
+
+/// Opens a raster read by window with one of terrio's own drivers (raw layouts such as SRTM tiles
+/// and EHdr, ENVI or SAGA grids, read row by row; Zarr stores, local or remote, read chunk by
+/// chunk; JPEG 2000 by tile and resolution level; GRIB by message). `None` when none of them
+/// reads the file so.
 pub(crate) fn open_lazy(path: &str) -> Option<Result<crate::LazyRaster>> {
+    if let Some(result) = open_raw(path) {
+        return Some(result.map(common::RawRaster::into_lazy));
+    }
     #[cfg(feature = "zarr")]
     if let Some(result) = zarr::open_lazy(path) {
         return Some(result);

@@ -128,8 +128,9 @@ fn open_vrt(py: Python<'_>, xml: &str, sources: &Bound<'_, PyDict>) -> PyResult<
 /// Args:
 ///     path: The raster's path or URL, as for `open`.
 ///     lazy: Read only the headers now and pixels on demand, by window. GeoTIFFs (and COGs,
-///         local or remote, fetched with HTTP range requests) are read in place; other formats
-///         are read whole either way.
+///         local or remote, fetched with HTTP range requests) are read in place, and so are
+///         raw-layout rasters (SRTM tiles, EHdr, ENVI, SAGA, ERS, Idrisi and Surfer 6 grids),
+///         JPEG 2000, GRIB and Zarr; other formats are read whole either way.
 ///
 /// Returns:
 ///     Raster: The raster.

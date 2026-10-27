@@ -1,7 +1,7 @@
 //! Esri `.hdr` labelled rasters (EHdr): BIL, BIP and BSQ data files such as `.bil` and `.flt`,
 //! with a `.hdr` header and a `.prj` CRS, read and written as GDAL does.
 
-use super::common::{self, Interleave, Layout};
+use super::common::{self, Interleave, Layout, RawRaster};
 use crate::formats::RasterDriver;
 use crate::{Error, RasterDataset, Result};
 use std::path::Path;
@@ -18,8 +18,8 @@ pub(crate) fn is_ehdr(path: &Path) -> bool {
     })
 }
 
-/// Reads an EHdr data file.
-pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
+/// Opens an EHdr data file, reading only its header now: its pixels are read by window.
+pub(crate) fn open(path: &Path) -> Result<RawRaster> {
     let hdr = common::sibling(path, "hdr");
     let text = std::fs::read_to_string(&hdr).map_err(|e| Error::InvalidData(format!("{}: {e}", hdr.display())))?;
     let mut keys = Vec::new();
@@ -83,7 +83,6 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
     let little = get("byteorder").and_then(|b| b.chars().next()).is_some_and(|c| matches!(c.to_ascii_uppercase(), 'I' | 'L'));
     let layout =
         Layout { cols, rows, bands, data_type, little_endian: little, interleave, offset: int("skipbytes").unwrap_or(0), bottom_up: false };
-    let pixels = common::decode(&std::fs::read(path)?, &layout)?;
 
     // Georeferencing: ULXMAP/ULYMAP are pixel centres; xllcorner/yllcorner corners.
     let (xdim, ydim) = match num("cellsize") {
@@ -118,8 +117,8 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
         common::NO_GEOTRANSFORM
     };
     let crs = common::read_prj(path).unwrap_or_default();
-    let raster = common::make_raster(cols, rows, bands, pixels, gt, crs, nodata)?;
-    Ok(RasterDataset::with_driver(raster, RasterDriver::EHdr, nodata.is_some()))
+    let raster = common::raster_header(cols, rows, bands, data_type, gt, crs, nodata)?;
+    RawRaster::open(RasterDataset::with_driver(raster, RasterDriver::EHdr, nodata.is_some()), path, layout, &[&hdr])
 }
 
 /// Writes an EHdr raster: the BIL data file at `path`, a `.hdr` and a `.prj`.

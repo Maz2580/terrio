@@ -14,7 +14,8 @@ Suites:
     histograms        ``terrio info --hist`` vs ``gdalinfo -hist`` (compare_hist_with_gdal.py)
     vector-roundtrip  vector files converted by terrio, read back by GDAL (compare_with_gdal.py)
     raster-roundtrip  raster drivers, GDAL writing and terrio reading and back (raster_roundtrip.py)
-    windows           windowed and overview reads of GeoTIFFs and JPEG 2000 (compare_windows_with_gdal.py)
+    windows           windowed and overview reads of GeoTIFFs, JPEG 2000 and raw-layout rasters
+                      (compare_windows_with_gdal.py)
     ops               translate, warp, mosaic vs GDAL's tools (compare_ops_with_gdal.py)
     catalogs          indexed real DEM mosaics and HTTP window I/O vs GDAL GTI
                       (compare_catalogs_with_gdal.py)
@@ -358,13 +359,14 @@ def suite_raster_roundtrip(ctx):
 
 
 def suite_windows(ctx):
-    """Windowed and overview reads of the GeoTIFFs and JPEG 2000 files, locally (and remote files
-    with --remote)."""
+    """Windowed and overview reads of the GeoTIFFs, JPEG 2000 files and raw-layout rasters, locally
+    (and remote files with --remote)."""
     s = Suite(
         "windows",
         "Windowed and overview reads",
         "GDAL reading the same windows",
-        "Windows of every GeoTIFF and JPEG 2000 file of the test data, at full resolution and from each "
+        "Windows of every GeoTIFF, JPEG 2000 file and raw-layout raster (SRTM HGT, EHdr, ENVI, SAGA, "
+        "ERS, Idrisi, Surfer 6) of the test data, at full resolution and from each "
         "overview (JPEG 2000 resolution levels), read "
         "in place by `terrio convert --srcwin --overview`: pixels identical, geotransforms within "
         "1e-9." + (" Remote: the same on public Cloud Optimized GeoTIFFs over HTTP." if ctx.remote else ""),
@@ -376,7 +378,12 @@ def suite_windows(ctx):
             m = re.match(r"^(.+?): (full|ovr \d+)\s+(\(.*?\)): (.*)$", line)
             if m:
                 level = "full resolution" if m[2] == "full" else "overviews"
-                fmt = "JPEG 2000" if m[1].endswith(".jp2") or "JPEG 2000" in m[1] else "GTiff"
+                if m[1].endswith(".jp2") or "JPEG 2000" in m[1]:
+                    fmt = "JPEG 2000"
+                elif m[1].endswith((".tif", ".tiff")) or mode == "remote":
+                    fmt = "GTiff"
+                else:
+                    fmt = "Raw layouts"
                 group = f"{fmt} {mode}, {level}"
                 ok = m[4].strip() == "ok"
                 s.cases.append(Case(group, f"{m[1]} {m[2]} {m[3]}", IDENTICAL if ok else DIFFERS, "" if ok else m[4]))
