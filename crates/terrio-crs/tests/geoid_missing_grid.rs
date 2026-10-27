@@ -14,7 +14,7 @@ fn transformer(src: &str, dst: &str, opts: &TransformOptions) -> Transformer {
 
 fn warned(t: &Transformer) -> bool {
     t.flush_warnings();
-    terrio_crs::take_warnings().iter().any(|w| w.contains("geoid model needs a missing grid"))
+    terrio_crs::take_warnings().iter().any(|w| w.contains("geoid model did not apply"))
 }
 
 #[test]

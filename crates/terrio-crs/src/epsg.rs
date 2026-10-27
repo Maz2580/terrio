@@ -683,7 +683,13 @@ pub(crate) fn geoid_models(vertical: u32) -> Vec<(u32, u32, Vec<Arc<Op>>)> {
 pub(crate) fn geoid_grid_models(vertical: u32) -> Vec<Arc<Op>> {
     let t = table();
     let grids = |list: &[(u32, Lazy<OpLists>)]| -> Vec<Arc<Op>> {
-        list.iter().flat_map(|(_, lazy)| lazy.get(&t.text, |ids| t.lists(ids)).1.iter().cloned()).collect()
+        list.iter()
+            .flat_map(|(_, lazy)| {
+                // The list with grids is stored empty when it equals the one without
+                let (ops, grid_ops) = lazy.get(&t.text, |ids| t.lists(ids));
+                if grid_ops.is_empty() { ops } else { grid_ops }.iter().filter(|o| o.needs_grids()).cloned().collect::<Vec<_>>()
+            })
+            .collect()
     };
     if let Some(list) = t.geoids.get(&vertical) {
         return grids(list);

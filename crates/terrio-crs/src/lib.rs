@@ -1322,7 +1322,10 @@ impl Transformer {
             (1, "ballpark coordinate operation used between different ellipsoids; datum shift is unknown"),
             (2, "best coordinate operation needs a missing grid; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR"),
             (4, "coordinate operation used outside its area of use"),
-            (8, "geoid model needs a missing grid, so heights were kept unchanged; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR"),
+            (
+                8,
+                "geoid model did not apply (its grid is missing or could not be read), so heights were kept unchanged; set TERRIO_NETWORK=ON or TERRIO_GRID_DIR",
+            ),
         ] {
             if flags & bit != 0 {
                 (self.warning_handler)(message.into());
@@ -1407,12 +1410,14 @@ impl Transformer {
     }
 
     /// Records, for the warning, that a side's heights were kept unchanged although a geoid model
-    /// covering the point exists: its grid is missing. Under the strict options
+    /// with a grid covers the point: the grid is missing, or could not be read or downloaded
+    /// (availability alone cannot tell, as a `.tif` counts as available with the network on).
+    /// Callers have established that no geoid model applied. Under the strict options
     /// [`check_vertical_policy`](Self::check_vertical_policy) has already refused the point.
     fn note_missing_geoid(&self, vertical: Option<&std::sync::Arc<def::Vertical>>, p: datum::Point) {
         let Some(code) = vertical.and_then(|v| v.code) else { return };
         let (lon, lat) = (p.lon.to_degrees(), p.lat.to_degrees());
-        if epsg::geoid_grid_models(code).iter().any(|op| op.contains(lon, lat) && !op.available()) {
+        if epsg::geoid_grid_models(code).iter().any(|op| op.contains(lon, lat)) {
             self.diagnostics.fetch_or(8, std::sync::atomic::Ordering::Relaxed);
         }
     }
