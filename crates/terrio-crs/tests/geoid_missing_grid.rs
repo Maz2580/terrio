@@ -40,7 +40,7 @@ fn heights_outside_every_geoid_model_are_not_reported() {
     let _ = terrio_crs::take_warnings();
     // OSGM15 covers Great Britain: a point in the mid-Atlantic has no model whose grid could be missing
     let t = transformer("EPSG:4937", "EPSG:4258+5701", &TransformOptions::default());
-    let _ = t.transform_3d(-30.0, 40.0, 100.0);
+    assert_eq!(t.transform_3d(-30.0, 40.0, 100.0).unwrap().2, 100.0);
     assert!(!warned(&t));
 }
 

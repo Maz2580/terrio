@@ -1028,6 +1028,9 @@ pub struct Transformer {
     best_route: std::sync::OnceLock<route::Route>,
     policy: TransformOptions,
     missing_grid_checked: std::sync::OnceLock<()>,
+    /// The geoid models with grids of the source and target vertical CRSs, found on first use.
+    src_geoid_grids: std::sync::OnceLock<Vec<std::sync::Arc<datum::Op>>>,
+    dst_geoid_grids: std::sync::OnceLock<Vec<std::sync::Arc<datum::Op>>>,
     emitted_diagnostics: std::sync::atomic::AtomicU8,
     diagnostics: std::sync::atomic::AtomicU8,
     warning_handler: fn(String),
@@ -1273,6 +1276,8 @@ impl Transformer {
             best_route: std::sync::OnceLock::new(),
             policy: opts.clone(),
             missing_grid_checked: std::sync::OnceLock::new(),
+            src_geoid_grids: std::sync::OnceLock::new(),
+            dst_geoid_grids: std::sync::OnceLock::new(),
             emitted_diagnostics: std::sync::atomic::AtomicU8::new(0),
             diagnostics: std::sync::atomic::AtomicU8::new(0),
             warning_handler: warnings::warn,
@@ -1414,13 +1419,18 @@ impl Transformer {
     /// (availability alone cannot tell, as a `.tif` counts as available with the network on), or
     /// has no value there. Callers have established that no geoid model applied. Under the strict
     /// options [`check_vertical_policy`](Self::check_vertical_policy) has already refused the point.
-    fn note_missing_geoid(&self, vertical: Option<&std::sync::Arc<def::Vertical>>, p: datum::Point) {
+    fn note_missing_geoid(
+        &self,
+        models: &std::sync::OnceLock<Vec<std::sync::Arc<datum::Op>>>,
+        vertical: Option<&std::sync::Arc<def::Vertical>>,
+        p: datum::Point,
+    ) {
         if self.diagnostics.load(std::sync::atomic::Ordering::Relaxed) & 8 != 0 {
             return; // already recorded: the warning is reported once
         }
         let Some(code) = vertical.and_then(|v| v.code) else { return };
         let (lon, lat) = (p.lon.to_degrees(), p.lat.to_degrees());
-        if epsg::geoid_grid_models(code).iter().any(|op| op.contains(lon, lat)) {
+        if models.get_or_init(|| epsg::geoid_grid_models(code)).iter().any(|op| op.contains(lon, lat)) {
             self.diagnostics.fetch_or(8, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -1589,7 +1599,7 @@ impl Transformer {
         }
         if self.src.vertical().is_some() && !geoid {
             self.check_vertical_policy(!h.src.models.is_empty())?;
-            self.note_missing_geoid(self.src.vertical(), p0);
+            self.note_missing_geoid(&self.src_geoid_grids, self.src.vertical(), p0);
         }
         if start.is_none() && self.src.vertical().is_some() {
             route::note(None, false, route::OpKind::Vertical);
@@ -1602,7 +1612,7 @@ impl Transformer {
             let Some((r, applied)) = run_model(ops, q, false) else { continue };
             if !applied {
                 self.check_vertical_policy(true)?;
-                self.note_missing_geoid(self.dst.vertical(), q);
+                self.note_missing_geoid(&self.dst_geoid_grids, self.dst.vertical(), q);
             }
             let r = match &h.dst.routes[*j] {
                 Some(route) => route.apply(&h.dst.defs[*j], r.lon.to_degrees(), r.lat.to_degrees(), r, false).ok_or_else(fail)?,
@@ -1616,7 +1626,7 @@ impl Transformer {
         }
         if self.dst.vertical().is_some() {
             self.check_vertical_policy(!h.dst.models.is_empty())?;
-            self.note_missing_geoid(self.dst.vertical(), p);
+            self.note_missing_geoid(&self.dst_geoid_grids, self.dst.vertical(), p);
             route::note(None, false, route::OpKind::Vertical);
         }
         let q = h.middle(i, 0).apply(&h.src.defs[i], sx, sy, p, true).ok_or_else(fail)?;
