@@ -639,6 +639,35 @@ mod tests {
         assert!(matches!(writable_local_file("/vsizip/a.zip/a.tif"), Err(Error::Unsupported(_))));
     }
     #[test]
+    fn aggregate_metadata_budget_bounds_overlapping_tag_payloads() {
+        let count = 65u16;
+        let payload = 1u32 << 20;
+        let offset = 8 + 2 + u32::from(count) * 12 + 4;
+        let mut bytes = b"II*\0\x08\0\0\0".to_vec();
+        bytes.extend(count.to_le_bytes());
+        for tag in 65000..65000 + count {
+            bytes.extend(tag.to_le_bytes());
+            bytes.extend(1u16.to_le_bytes());
+            bytes.extend(payload.to_le_bytes());
+            bytes.extend(offset.to_le_bytes());
+        }
+        bytes.extend(0u32.to_le_bytes());
+        bytes.resize((offset + payload) as usize, 0);
+        let error = parse(&mut std::io::Cursor::new(bytes)).unwrap_err();
+        assert!(error.to_string().contains("metadata exceeds 64 MiB"), "{error}");
+    }
+
+    #[test]
+    fn invalid_utf8_ghost_metadata_never_produces_a_byte_offset() {
+        let body = b"\xFFLAYOUT=IFDS_BEFORE_DATA\nKNOWN_INCOMPATIBLE_EDITION=NO\n ";
+        let mut bytes = vec![0; 8];
+        bytes.extend(format!("GDAL_STRUCTURAL_METADATA_SIZE={:06} bytes\n", body.len()).as_bytes());
+        bytes.extend(body);
+        bytes.extend([0; 16]);
+        assert!(intact_cog_layout(&mut std::io::Cursor::new(bytes), false).unwrap().is_none());
+    }
+
+    #[test]
     fn cog_marker_requires_the_padding_it_overwrites() {
         for (suffix, accepted) in [("\n ", true), ("\nX", false), ("", false)] {
             let body = format!("LAYOUT=IFDS_BEFORE_DATA\nKNOWN_INCOMPATIBLE_EDITION=NO{suffix}");
