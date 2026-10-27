@@ -29,7 +29,9 @@ And:
   `approximatecoplanar`, `estimaterank`, `lof`, `nndistance`, `radialdensity`, `reciprocity`,
   `miniball`, `zsmooth`, `skewnessbalancing`, `head`, `tail`, `sort`, `locate`, `iqr`, `mad`,
   `dem`, `colorization` and `overlay` (every value, PDAL's doubles read back bit for bit, with
-  rasters and polygons made from the points) on autzen_trim.las;
+  rasters and polygons made from the points) on autzen_trim.las; `hexbin` (the dense hexagons
+  and their counts, the boundary's polygons, holes, area and symmetric difference with PDAL's,
+  smoothed and not, needs shapely) on autzen_trim.las and a crop of it;
 - interpolated grids: `linear` and `nearest` compared with `gdal_grid -a linear` and
   `-a nearest`.
 
@@ -1049,6 +1051,88 @@ def compare_raster_vector_filters(path: Path, tmp: Path) -> None:
         report(f"filter overlay {dim} column {column} {name}: {d} identical", np.array_equal(np.asarray(ours[d]).astype("f8"), ref[d]), "different values")
 
 
+def compare_hexbin(path: Path, tmp: Path) -> None:
+    """Compares PDAL's `filters.hexbin` with terrio's `PointCloud.hexbin`.
+
+    On the whole file and on a 300 x 300 unit crop (written once, so that both read the same
+    points in the same order: the first point anchors the grid), with given and estimated edge
+    lengths, smoothed and not: the dense hexagons (PDAL's `density` output: centres and counts),
+    the boundary's polygon and hole counts, its area (PDAL's `area`) and the area of its
+    symmetric difference with PDAL's `boundary_json` (whose coordinates have 8 decimals),
+    relative to PDAL's area, and every vertex (rings normalized: terrio's holes run clockwise,
+    hexer's counter-clockwise).
+
+    Args:
+        path: A LAS file.
+        tmp: A directory for the outputs.
+    """
+    if not PDAL:
+        return
+    try:
+        import shapely
+        from shapely.geometry import shape
+    except ImportError:
+        print("     (no shapely: hexbin not compared)")
+        return
+    pc = terrio.read_points(str(path))
+    x0, y0 = float(pc["x"][0]), float(pc["y"][0])
+    crop = tmp / "hexbin_crop.las"
+    pc.crop(bounds=[f"([{x0 - 150}, {x0 + 150}], [{y0 - 150}, {y0 + 150}])"]).write(str(crop))
+    # (file, edge length (None: estimated), threshold, smooth); the area within 1e-9 of PDAL's
+    # (which it prints with 10 digits), the symmetric difference within 1e-9 of it.
+    cases = [
+        (path, 10.0, 15, False),
+        (path, 4.6, 3, False),
+        (path, None, 15, False),
+        (crop, 4.6, 3, False),
+        (crop, 1.4, 1, False),
+        (path, 10.0, 15, True),
+        (path, None, 15, True),
+        (crop, 4.6, 3, True),
+        (crop, 1.4, 3, True),
+    ]
+    tol = 1e-9
+    for src, edge, threshold, smooth in cases:
+        density = tmp / "hexbin_density.geojson"
+        density.unlink(missing_ok=True)
+        meta = tmp / "hexbin_meta.json"
+        stage = {"type": "filters.hexbin", "threshold": threshold, "smooth": smooth, "density": str(density)}
+        if edge:
+            stage["edge_length"] = edge
+        subprocess.run([PDAL, "pipeline", "--stdin", "--metadata", str(meta)], input=json.dumps([str(src), stage]), text=True, check=True, capture_output=True)
+        ref_meta = json.loads(meta.read_text())["stages"]["filters.hexbin"]
+        ref = shape(ref_meta["boundary_json"])
+        ours = terrio.read_points(str(src)).hexbin(edge, threshold=threshold, smooth=smooth)
+        geom = shape(ours["boundary_json"])
+        label = f"hexbin {src.name} edge {edge or 'estimated'} threshold {threshold} smooth {smooth}"
+        if not edge:
+            report(f"{label}: estimated edge {ours['estimated_edge']:.9g} vs PDAL {ref_meta['estimated_edge']:.9g}",
+                   abs(ours["estimated_edge"] - ref_meta["estimated_edge"]) <= 1e-9 * ref_meta["estimated_edge"], "different edge")
+        # The dense hexagons: their centres (to a hundredth of the edge) and counts.
+        step = ours["edge_length"] / 100
+
+        def cells(features, key):
+            return sorted((round(shape(f["geometry"]).centroid.x / step), round(shape(f["geometry"]).centroid.y / step), f["properties"][key]) for f in features)
+
+        ref_cells = cells(json.loads(density.read_text())["features"], "COUNT")
+        our_cells = cells(ours["hexagons"].__geo_interface__["features"], "count")
+        report(f"{label}: {len(our_cells)} hexagons and their counts vs PDAL {len(ref_cells)}", our_cells == ref_cells, "different hexagons")
+        parts = lambda g: [] if g.is_empty else list(getattr(g, "geoms", [g]))
+        holes = lambda g: sum(len(p.interiors) for p in parts(g))
+        sym = 0.0 if (geom.is_empty and ref.is_empty) else shapely.symmetric_difference(geom, ref).area
+        rel = sym / ref_meta["area"] if ref_meta["area"] > 0 else sym
+        darea = abs(ours["area"] - ref_meta["area"]) / ref_meta["area"] if ref_meta["area"] > 0 else abs(ours["area"])
+        same_shape = len(parts(geom)) == len(parts(ref)) and holes(geom) == holes(ref)
+        # PDAL's smoothed boundary of one polygon is a POLYGON; terrio's is always a MULTIPOLYGON.
+        multi = lambda g: shapely.MultiPolygon([g]) if g.geom_type == "Polygon" else g
+        same_vertices = shapely.normalize(multi(geom)).equals_exact(shapely.normalize(multi(ref)), 1e-7)
+        print(f"     {label}: {len(parts(geom))} polygons, {holes(geom)} holes (PDAL {len(parts(ref))}, {holes(ref)}); "
+              f"area {ours['area']:.6f} (PDAL {ref_meta['area']:.6f}, {darea:.2g} apart); symmetric difference {rel:.2g} of PDAL's area")
+        report(f"{label}: polygons, holes, area and every vertex vs PDAL (area and symmetric difference within {tol:g})",
+               same_shape and same_vertices and rel <= tol and darea <= tol,
+               f"symmetric difference {rel:.3g}, area {darea:.3g}, same vertices {same_vertices}")
+
+
 def compare_interpolation(path: Path, tmp: Path) -> None:
     """Compares linear (TIN) and nearest-neighbour grids with `gdal_grid`'s.
 
@@ -1124,6 +1208,7 @@ def main() -> None:
         compare_more_filters(root / "autzen_trim.las", tmp)
         compare_neighbourhood_filters(root / "autzen_trim.las", tmp)
         compare_raster_vector_filters(root / "autzen_trim.las", tmp)
+        compare_hexbin(root / "autzen_trim.las", tmp)
         if PDAL and not args.quick and (root / "madison.copc.laz").exists():
             madison = tmp / "madison.las"
             terrio.convert_points(str(root / "madison.copc.laz"), str(madison))

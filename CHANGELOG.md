@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Formats
+
+- SRTM HGT tiles are read and written (the `SRTMHGT` driver), as GDAL's SRTMHGT
+  driver does: 3", 1" and 0.5" tiles georeferenced from their name
+  (`N37W120.hgt`), `.hgt.zip` archives, and the NASADEM and water body variants.
+  Tiles are written as Int16 with -32768 for nodata; a grid of another size is
+  refused.
+
+### Breaking changes
+
+- `mosaic`, `warp`, `concat` and `filter merge` now treat an input beginning
+  with `@` as a file list, so a file named `@name.tif` must be written
+  `./@name.tif`.
+
+### Command line
+
+- `mosaic`, `warp`, `concat` and `filter merge` read inputs from a file list:
+  `@FILE` stands for the paths listed in FILE, one per line, as GDAL's
+  `--input @filelist.txt` does (#323). MCP tool calls refuse `@FILE`, so that a
+  client cannot read a file back through the errors naming its lines.
+
+### Point clouds
+
+- PDAL's `filters.hexbin`: the boundary of points on a grid of hexagons (the hexagons with at
+  least a threshold of points, as polygons with holes), with its area, density and point
+  spacing, and the hexagons with their counts. `terrio filter hexbin` (and MCP) writes them as
+  vector datasets, reading the points in chunks; Python's `PointCloud.hexbin` returns PDAL's
+  metadata (`boundary` as WKT, `boundary_json`...) with both as layers; JavaScript's
+  `PointCloud.hexbin` returns both as a vector dataset; Rust has `pointcloud::filters::hexbin`
+  and `HexBinner`. PDAL's options (`edge_length`/`edge_size` or its estimate from
+  `sample_size` points, `threshold`, `smooth`, `hole_cull_area_tolerance`, `precision`) and a
+  grid `origin`; H3 grids are not implemented. Hexagons, counts and boundaries (smoothed or not)
+  are identical to PDAL 2.10's on autzen; points are assigned to hexagons as hexer assigns them
+  (a port, attributed in `NOTICE`).
+
 ### CRS compatibility
 
 - Transformer construction now checks celestial-body compatibility for all CRS
@@ -22,3 +57,25 @@
   previously treated as ordinary east/north coordinates. This matches GDAL's
   traditional GIS axis strategy; ordinary north/east Earth axes still use
   longitude, latitude order.
+
+### Warp
+
+- With bilinear, cubic, cubic spline and Lanczos, an output pixel whose source
+  pixel under the sample point is nodata (or cut out) is now left unwritten
+  (at the output's nodata value, when it has one) for a single-band source too,
+  as GDAL does: it took a value renormalised over the valid neighbours, which
+  moved the edge of the data about a pixel into nodata areas. Several bands
+  already behaved so, with unified nodata.
+
+### Shapefile
+
+- In polygon records of several parts, rings that touch themselves at a vertex
+  to enclose a hole, which Esri allows, are now split into an exterior and
+  holes when read, wherever the stored ring starts, as GDAL 3.13 does (GDAL
+  3.12 keeps them as stored). A ring whose loops are not holes (a figure-eight,
+  a loop outside the ring, a spike), and a record of a single ring, are still
+  read as stored, also as GDAL does. The split rings start at the vertex the
+  rings GEOS rebuilds for GDAL start at. The `shapefile-rings` conformance
+  suite compares 18 such cases with GDAL.
+- A hole whose first vertex lies on the exterior now belongs to that exterior.
+  It was read as a polygon of its own.

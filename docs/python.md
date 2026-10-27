@@ -330,6 +330,25 @@ These follow GDAL's `gdal raster unscale`, `nodata-to-alpha`, `reclassify` and `
 see [unscale](cli.md#unscale), [nodata-to-alpha](cli.md#nodata-to-alpha),
 [reclassify](cli.md#reclassify) and [as-features](cli.md#as-features).
 
+## File management
+
+```python
+terrio.vsi_list("s3://bucket/prefix", recursive=True)        # gdal vsi list
+terrio.vsi_list("/vsizip/data.zip", recursive=True, depth=2)
+terrio.vsi_copy("data", "s3://bucket/prefix", recursive=True)  # gdal vsi copy
+terrio.vsi_sync("data/", "s3://bucket/prefix", recursive=True, strategy="ETag")
+terrio.vsi_move("s3://bucket/old", "s3://bucket/new")
+terrio.vsi_delete("s3://bucket/prefix", recursive=True)
+terrio.vsi_write("/vsimem/a.txt", b"bytes"); terrio.vsi_read("/vsimem/a.txt")
+terrio.vsi_stat("gs://bucket/key")  # None when nothing is there
+```
+
+The `terrio vsi` commands as functions: entries are dictionaries (`name`, `type`, `size`,
+`modified` in seconds since the epoch, `last_modification_date`, `permissions`, `etag`), and the
+copy, sync, move and delete functions return a report (`copied`, `bytes`, `unchanged`,
+`deleted`, `errors`). `/vsimem/` files last as long as the process. Locations, semantics and the
+refusals of dangerous deletions are those of [vsi](cli.md#vsi).
+
 ## Typing
 
 The package ships type stubs (`py.typed`), checked with `mypy --strict` and `stubtest`:
@@ -478,6 +497,9 @@ uploaded = terrio.open_vrt(xml, {"dem.tif": image_bytes})
 source windows remain lazy. `open_raster(path, lazy=True)` also opens VRT files
 lazily. The [serialized VRT support](cli.md#serialized-virtual-rasters) lists the
 supported transformers, built-in functions, kernels and masks.
+
+VSI listing bindings return structured flat entries. Nested tree presentation (`--tree`)
+is currently available through the CLI; JSON serialization flags apply to CLI output.
 
 ### Raster management
 

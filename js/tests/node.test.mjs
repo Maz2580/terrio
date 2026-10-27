@@ -581,6 +581,17 @@ test("PLY and E57 bytes, PDAL's filters and TIN gridding", { skip: needs("pointc
   assert.ok(pc.radialDensity(1).get("radial_density").every((v) => v > 0));
   assert.ok(pc.reciprocity().get("reciprocity").every((v) => v >= 0 && v <= 100));
   assert.ok(pc.miniball().get("miniball").every((v) => v >= 0 && v <= 1));
+  // PDAL's filters.hexbin: the boundary of the points on hexagons, and the hexagons.
+  const hex = pc.hexbin(1.4, { threshold: 3, smooth: false });
+  assert.deepEqual(hex.layerNames(), ["boundary", "hexagons"]);
+  const boundary = hex.toGeoJSON("boundary").features[0];
+  assert.equal(boundary.geometry.type, "MultiPolygon");
+  assert.equal(boundary.properties.point_count, n);
+  assert.ok(boundary.properties.area > 0 && hex.toGeoJSON("hexagons").features.length === boundary.properties.hex_count);
+  assert.throws(() => pc.hexbin(-1));
+  // An edge length of 0: estimated from the first points, as PDAL's.
+  const estimated = pc.hexbin(0, { sampleSize: 100 }).toGeoJSON("boundary").features[0].properties;
+  assert.ok(estimated.edge_length > 0 && estimated.point_count === n);
   assert.ok(pc.zsmooth("Smoothed", 1).get("smoothed").every((v) => v >= 100 && v < 108));
   const ground2 = pc.skewnessBalancing().get("z");
   assert.ok(ground2.every((v, i) => i === 0 || v >= ground2[i - 1]));
@@ -1823,6 +1834,128 @@ test("unterminated quoted PROJ values raise an error", () => {
     '+proj=tmerc +datum=WGS84 +title="abc +k=0.9996'), /unterminated quoted PROJ value/);
 });
 
+test("vsi: in-memory files, zip archives in memory and refused targets", () => {
+  terrio.vsiWrite("/vsimem/jsvsi/a/b.txt", new TextEncoder().encode("bee"));
+  terrio.vsiWrite("/vsimem/jsvsi/c.txt", new Uint8Array([1, 2, 3]));
+  const all = terrio.vsiList("/vsimem/jsvsi", { recursive: true });
+  assert.deepEqual(all.map(e => [e.name, e.type, e.size]), [["a", "directory", null], ["a/b.txt", "file", 3], ["c.txt", "file", 3]]);
+  assert.equal(terrio.vsiCopy("/vsimem/jsvsi", "/vsimem/jsvsi2", { recursive: true }).copied, 2);
+  assert.equal(new TextDecoder().decode(terrio.vsiRead("/vsimem/jsvsi2/a/b.txt")), "bee");
+  terrio.vsiMove("/vsimem/jsvsi2/c.txt", "/vsimem/jsvsi2/d.txt");
+  assert.equal(terrio.vsiStat("/vsimem/jsvsi2/c.txt"), null);
+  assert.equal(terrio.vsiStat("/vsimem/jsvsi2/d.txt").size, 3);
+  assert.equal(terrio.vsiSync("/vsimem/jsvsi/", "/vsimem/jsvsi3", { recursive: true, strategy: "overwrite" }).copied, 2);
+  assert.equal(terrio.vsiSync("/vsimem/jsvsi/", "/vsimem/jsvsi3", { recursive: true }).unchanged, 2);
+  assert.equal(terrio.vsiDelete("/vsimem/jsvsi2", { recursive: true }).deleted, 2);
+  assert.throws(() => terrio.vsiDelete("/vsimem/", true), /refusing/);
+  assert.throws(() => terrio.vsiDelete("/vsimem/jsvsi"), /recursive/);
+  // A Shapefile ZIP written by terrio, listed and read in memory.
+  const ds = terrio.fromGeoJSON({ type: "FeatureCollection", features: [
+    { type: "Feature", geometry: { type: "Point", coordinates: [1, 2] }, properties: { n: 1 } },
+  ] }, "pts", "EPSG:4326");
+  terrio.vsiWrite("/vsimem/jsvsi/pts.zip", ds.toBytes("pts.shp.zip"));
+  const members = terrio.vsiList("/vsizip//vsimem/jsvsi/pts.zip").map(e => e.name);
+  assert.ok(["pts.shp", "pts.shx", "pts.dbf", "pts.prj"].every(m => members.includes(m)), members.join());
+  assert.deepEqual(Array.from(terrio.vsiRead("/vsizip//vsimem/jsvsi/pts.zip/pts.shp").slice(0, 4)), [0, 0, 39, 10]);
+  assert.throws(() => terrio.vsiDelete("/vsizip//vsimem/jsvsi/pts.zip/pts.shp"), /read only/);
+  assert.throws(() => terrio.vsiWrite("local.txt", new Uint8Array(1)), /WebAssembly/);
+  terrio.vsiDelete("/vsimem/jsvsi", true);
+  terrio.vsiDelete("/vsimem/jsvsi3", true);
+});
+
+test("vsi: memory root remains a directory after refused writes", () => {
+  for (const path of ["/vsimem", "/vsimem/"]) {
+    assert.throws(() => terrio.vsiWrite(path, new Uint8Array([1])), /root/);
+    assert.equal(terrio.vsiStat(path).type, "directory");
+  }
+});
+
+test("vsi: finite-depth listUrl requests delimiter pages only to its boundary", async () => {
+  const seen = [];
+  const fetch = async url => {
+    seen.push(url);
+    const query = new URL(url).searchParams;
+    assert.equal(query.get("delimiter"), "/");
+    const prefix = query.get("prefix");
+    if (prefix === "dir/") {
+      return new Response("<ListBucketResult><CommonPrefixes><Prefix>dir/sub/</Prefix></CommonPrefixes></ListBucketResult>");
+    }
+    assert.equal(prefix, "dir/sub/");
+    return new Response("<ListBucketResult><Contents><Key>dir/sub/a.tif</Key><Size>5</Size></Contents><CommonPrefixes><Prefix>dir/sub/deeper/</Prefix></CommonPrefixes></ListBucketResult>");
+  };
+  const result = await terrio.listUrl("s3://bkt/dir", { recursive: true, depth: 2, fetch });
+  assert.deepEqual(result.entries.map(e => e.name), ["sub", "sub/a.tif", "sub/deeper"]);
+  assert.equal(seen.length, 2);
+});
+
+test("vsi: listUrl failures do not expose SAS credentials", async () => {
+  await assert.rejects(
+    terrio.listUrl("https://account.blob.core.windows.net/container/dir?sig=PRIVATE_TEST_SIGNATURE", {
+      fetch: async () => new Response("failed", {status: 500}),
+    }),
+    error => !error.message.includes("PRIVATE_TEST_SIGNATURE") && error.message.includes("500"),
+  );
+});
+
+test("vsi: listUrl lists object stores and HTML index pages through fetch", async () => {
+  const pages = {
+    "https://bkt.s3.amazonaws.com/?list-type=2&prefix=dir%2F":
+      "<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>dir/a/b.tif</Key><Size>5</Size><ETag>&quot;e1&quot;</ETag>" +
+      "<LastModified>2024-01-01T01:42:27.000Z</LastModified></Contents><NextContinuationToken>t2</NextContinuationToken></ListBucketResult>",
+    "https://bkt.s3.amazonaws.com/?continuation-token=t2&list-type=2&prefix=dir%2F":
+      "<ListBucketResult><Contents><Key>dir/c.tif</Key><Size>7</Size></Contents></ListBucketResult>",
+    "https://example.com/data/": '<title>Index of /data</title><a href="../">up</a><a href="x.tif">x</a><a href="sub/">sub</a>',
+    "https://example.com/data/sub/": '<title>Index of /data/sub</title><a href="y.tif">y</a>',
+  };
+  const seen = [];
+  const fetch = async (url) => {
+    seen.push(url);
+    return url in pages ? new Response(pages[url], { status: 200, headers: {"Content-Type": url.startsWith("https://example.com") ? "text/html" : "application/xml"} }) : new Response("missing", { status: 404 });
+  };
+  const s3 = await terrio.listUrl("s3://bkt/dir", { recursive: true, fetch });
+  assert.deepEqual(s3.entries.map(e => [e.name, e.size]), [["a", null], ["a/b.tif", 5], ["c.tif", 7]]);
+  assert.equal(s3.entries[1].lastModificationDate, "2024-01-01 01:42:27Z");
+  assert.equal(s3.entries[1].etag, "e1");
+  assert.equal(s3.requests, 2);
+  const html = await terrio.listUrl("https://example.com/data", { recursive: true, fetch });
+  assert.deepEqual(html.entries.map(e => e.name), ["sub", "sub/y.tif", "x.tif"]);
+  assert.equal((await terrio.listUrl("https://example.com/data", { fetch })).entries.length, 2);
+  await assert.rejects(terrio.listUrl("https://example.com/nothing/", { fetch }), /404/);
+});
+
+test("promoteTo3d transforms ellipsoidal heights of a 2D CRS", () => {
+  // GDAL 3.12.2 / PROJ 9.8.1, RD New to WGS 84 3D, without grids.
+  const args = [[85000], [447000], "EPSG:28992", "EPSG:4979", [0]];
+  const normal = terrio.transformPoints(...args);
+  const promoted = terrio.transformPoints(...args, { promoteTo3d: true });
+  assert.equal(normal[2][0], 0);
+  assert.ok(Math.abs(promoted[2][0] - 43.57639261614531) < 0.001);
+  assert.ok(Math.abs(promoted[0][0] - 4.367683424792349) < 1e-8);
+  assert.ok(Math.abs(promoted[1][0] - 52.006949098822965) < 1e-8);
+});
+
+test("promoteTo3d applies to vector toBytes and preserves 2D geometry", () => {
+  const source = terrio.fromGeoJSON({ type: "FeatureCollection", features: [
+    { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [85000, 447000, 0] } },
+    { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [85000, 447000, 100] } },
+    { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [85000, 447000] } },
+  ] }, "points", "EPSG:28992");
+  const convert = promoteTo3d => terrio.open(source.toBytes("points.geojson", {
+    tSrs: "EPSG:4979", promoteTo3d,
+  }), "points.geojson").toGeoJSON().features.map(feature => feature.geometry.coordinates);
+  assert.deepEqual(convert(false).map(point => point[2]), [0, 100, undefined]);
+  const promoted = convert(true);
+  for (const [index, height] of [[0, 43.57639261614531], [1, 143.576799856499]]) {
+    assert.ok(Math.abs(promoted[index][2] - height) < 0.001, `height ${index}: ${promoted[index][2]}`);
+  }
+  assert.equal(promoted[2].length, 2);
+});
+
+test("unterminated quoted PROJ values raise an error", () => {
+  assert.throws(() => terrio.transformPoints([10], [40], "EPSG:4326",
+    '+proj=tmerc +datum=WGS84 +title="abc +k=0.9996'), /unterminated quoted PROJ value/);
+});
+
 
 test("vector dataset commands: rename, edit and key update preserve source datasets", () => {
   const geo = (rows) => ({ type: "FeatureCollection", features: rows.map(([name, n], i) => ({ type: "Feature", properties: {name, n}, geometry: {type: "Point", coordinates: [i, i]} })) });
@@ -1863,4 +1996,53 @@ test("raster management edit and move preserve pixel values", () => {
   assert.ok(moved.report.maxError < 1e-10);
   assert.deepEqual(terrio.open(moved.bytes, "moved.tif").readBand(1), terrio.open(original, "input.tif").readBand(1));
   assert.throws(() => terrio.editRaster(original, {histogram: true}), /sidecar/);
+});
+
+test("vsi: HTML listing cancels binary and oversized streams", async () => {
+  let canceled = false;
+  let reads = 0;
+  const binary = new ReadableStream({
+    pull(controller) { reads++; controller.enqueue(new Uint8Array(4096)); },
+    cancel() { canceled = true; },
+  }, {highWaterMark: 0});
+  await assert.rejects(terrio.listUrl("https://example.test/binary", {fetch: async () => new Response(binary)}), /not a listable/);
+  assert.equal(reads, 1);
+  assert.equal(canceled, true);
+  await assert.rejects(terrio.listUrl("https://example.test/large", {
+    fetch: async () => new Response("<title>Index of /</title><a href='x'>x</a>", {headers: {"Content-Type": "text/html", "Content-Length": String(8 << 20)}}),
+  }), /4 MiB/);
+  let sent = 0;
+  const oversized = new ReadableStream({
+    pull(controller) {
+      const block = new Uint8Array(65536).fill(32);
+      if (sent++ === 0) block.set(new TextEncoder().encode("<title>Index of /</title><a href='x'>x</a>"));
+      controller.enqueue(block);
+    },
+  }, {highWaterMark: 0});
+  await assert.rejects(terrio.listUrl("https://example.test/stream", {
+    fetch: async () => new Response(oversized, {headers: {"Content-Type": "text/html"}}),
+  }), /4 MiB/);
+  assert.equal(sent, 65);
+});
+
+test("object-store listing rejects binary and oversized response bodies", async () => {
+  await assert.rejects(terrio.listUrl("s3://bucket/dir", {fetch: async () => new Response("not XML")}), /not an XML/);
+  await assert.rejects(terrio.listUrl("s3://bucket/dir", {
+    fetch: async () => new Response("<ListBucketResult/>", {headers: {"Content-Length": String(17 << 20)}}),
+  }), /exceeds 16 MiB/);
+});
+
+test("cloud listing rejects malformed authority components before fetch", async () => {
+  let requests = 0;
+  const fetch = async () => { requests += 1; return new Response("<ListBucketResult/>"); };
+  for (const url of ["s3://evil.example#/dir", "s3://user@host/dir", "az://evil.example#/container/dir"]) {
+    await assert.rejects(terrio.listUrl(url, {fetch, headers: {Authorization: "test-value"}}), /invalid .* name/);
+  }
+  assert.equal(requests, 0);
+});
+
+test("object-store listing rejects HTML and error roots returned with status 200", async () => {
+  for (const body of ["<html><body>Sign in</body></html>", "<Error><Message>Denied</Message></Error>"]) {
+    await assert.rejects(terrio.listUrl("s3://bucket/dir", {fetch: async () => new Response(body)}), /not an XML object-store listing/);
+  }
 });

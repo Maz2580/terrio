@@ -64,6 +64,7 @@ terrio <COMMAND>
   formats         List the formats terrio reads and writes
   grid            Grid a point cloud into a raster (like PDAL's writers.gdal)
   filter          PDAL's point cloud filters (smrf, pmf, csf, elm, hag_nn, crop, expression...)
+  vsi             List, copy, delete, move and sync files on local, cloud, HTTP and archive locations (like gdal vsi)
   mcp             Serve these commands to AI agents over the Model Context Protocol
 ```
 
@@ -72,8 +73,24 @@ Install it with `curl -LsSf https://terrio.opengeos.org/install.sh | sh` (on Win
 `cargo install terrio-cli`; see [Installation](installation.md).
 
 Every input can be a local path, a URL, a cloud object or a zip archive member; see
-[Remote Data](remote-data.md). Outputs are local. Run `terrio <COMMAND> --help` for the full
+[Remote Data](remote-data.md). Outputs are local, except those of `terrio vsi`. Run `terrio <COMMAND> --help` for the full
 option list.
+
+The commands that take any number of inputs (`mosaic`, `warp`, `concat` and `filter merge`) read
+them from a file too, as GDAL's `--input @filelist.txt` does. `pansharpen` does not: its inputs
+have fixed roles, the panchromatic band first, and spectral inputs may carry `,band=N`. `@FILE`
+stands for the paths listed in FILE, one per line, with relative paths taken from the working
+directory. Unlike GDAL 3.13, which opens each line as written and fails on a blank line, terrio
+skips blank lines, trims whitespace around paths and ignores a byte-order mark at the start of the
+file. A list must be a regular file of at most 64 MiB. As in GDAL, every input beginning with `@`
+is read as a list: name a file whose name begins with `@` as `./@name.tif`. The [MCP tools](#mcp)
+refuse `@FILE`, since errors naming listed paths would let a client read a text file back line by
+line; MCP clients pass the inputs as arguments instead. Lists mix with paths given directly:
+
+```sh
+terrio mosaic @filelist.txt naip.vrt
+terrio warp @filelist.txt extra.tif out.tif --t-srs EPSG:3857
+```
 
 ## Geometry operations
 
@@ -803,6 +820,7 @@ reports those mask differences explicitly. Specify `--te` and `--ts` to compare 
 
 ```sh
 terrio mosaic INPUT... OUTPUT [options]
+terrio mosaic @filelist.txt OUTPUT [options]    # inputs listed in a file, one per line
 ```
 
 `--resolution highest|lowest|average|user`, `--tr`, `--te`, `--tap`, `--separate`, `-b`,
@@ -1406,6 +1424,127 @@ terrio mcp
 Serves the other commands to AI agents (Claude Code, Claude Desktop, Cursor, VS Code) as a Model
 Context Protocol server over standard input and output. See [AI Agents](mcp.md).
 
+## vsi
+
+```sh
+terrio vsi list -lR s3://bucket/prefix                 # gdal vsi list (ls)
+terrio vsi list -R --depth 2 -f json --tree /vsizip/data.zip
+terrio vsi copy -r data/ s3://bucket/prefix            # gdal vsi copy (cp)
+terrio vsi copy /vsizip//vsicurl/https://host/a.zip/a.shp .
+terrio vsi sync -r --strategy ETag data/ s3://bucket/prefix   # gdal vsi sync
+terrio vsi move s3://bucket/old s3://bucket/new        # gdal vsi move (mv, ren, rename)
+terrio vsi delete -r s3://bucket/prefix                # gdal vsi delete (rm, rmdir, del)
+```
+
+File management across locations, as GDAL's `gdal vsi` commands do on its virtual file systems:
+
+| Location | Forms | list | read | write, delete |
+|---|---|---|---|---|
+| Local files | `dir/file` | yes | yes | yes |
+| In memory | `/vsimem/dir/file` | yes | yes | yes (within one process: Python, JavaScript) |
+| Amazon S3, S3-compatible services | `s3://bucket/key`, `/vsis3/` | yes | yes | yes, signed (see [Remote Data](remote-data.md)) |
+| Google Cloud Storage | `gs://bucket/key`, `/vsigs/` | public buckets | yes | no: use its S3-compatible API (`s3://` with `AWS_S3_ENDPOINT=https://storage.googleapis.com` and HMAC keys) |
+| Azure Blob Storage | `az://container/blob`, `/vsiaz/` | yes | yes | with a SAS token (`AZURE_STORAGE_SAS_TOKEN`) |
+| HTTP(S) | `https://...`, `/vsicurl/` | from an HTML index page (Apache, nginx) | yes | no |
+| Zip archives | `/vsizip/a.zip/dir`, also `.kmz`, `.shz`; nested in remote locations | yes | yes | no |
+| Tar archives | `/vsitar/a.tar`, `.tar.gz`, `.tgz` | yes | yes | no |
+
+`list` prints a directory's entries (a file lists as itself), directories before what they hold
+and siblings by name; `-l` adds permissions, size and date as `ls -l` (and `gdal vsi list -l`)
+print them, `-R` recurses (`--depth N` levels), `--abs` prints absolute paths, `-f json` prints
+GDAL's JSON (names, or with `-l` objects with `name`, `type`, `size`,
+`last_modification_date`, `permissions`, and `etag` for objects), `--tree` nests it. An object
+store with unlimited depth is listed recursively in one paged listing (1,000 keys per request on S3). Finite depths use delimiter listings only down to the requested levels, including JavaScript `listUrl`. Remote zip archives are listed by range requests: the archive's end and central
+directory, about 32 KB for Natural Earth's 4.9 MB `ne_10m_admin_0_countries.zip`; tar archives
+by seeking from header to header. For an archive URL with a query string, braces keep the
+query attached to the archive, for example
+`/vsizip/{/vsicurl/https://host/data.zip?sig=TOKEN}/dir/member.tif`.
+
+`copy SRC DST` copies a file to `DST`, or into it when `DST` is an existing directory (or ends
+with `/`; a local destination directory named this way must already exist); a directory needs `-r` and is copied as `DST`, or into an existing `DST` as
+`DST/<name>`, as GDAL does. `--skip-errors` goes on past the files that fail, reporting them.
+Copies within S3 are server-side (`x-amz-copy-source`), uploads are single `PUT`s (up to 5 GiB),
+and other remote copies go through a temporary file. Local files are written to a temporary file
+renamed into place, so a failed copy leaves an existing target as it was.
+
+`sync SRC DST` copies the files that are missing or out of date in `DST` and deletes nothing; a
+source directory ending with `/` is synchronized into `DST`, without one as `DST/<name>`
+(rsync's convention, as GDAL's). `--strategy timestamp` (the default) copies when the sizes differ
+or the source is newer; `ETag` compares entity tags, or a local file's MD5 with an S3 object's
+(single-part uploads; multipart entity tags fall back to `timestamp`); `overwrite` always copies.
+
+`move SRC DST` renames on one local file system; elsewhere it copies, then deletes the source only
+once all of it was copied. `delete PATH` deletes a file; `-r` deletes a directory and what it
+holds.
+
+Safety: `delete` and `move` refuse an empty path, a file system root, the home directory, the
+current directory or one of its parents, the root of `/vsimem/`, a whole bucket or container,
+and archive and HTTP locations. Recursive deletion never follows symbolic links (the links are
+deleted), checks that every directory it enters is below the path given, and on object stores
+deletes only the keys below `prefix/` (not `prefix2/...`). Like GDAL 3.13.3, recursive object-store deletion preserves an exact object named `prefix`, even when it coexists with `prefix/` children; delete that exact object without `-r`. Recursive deletion of a lone object fails because there is no directory prefix to remove. `copy`, `sync` and `move` refuse to
+copy a directory into itself.
+Local recursive removal uses the standard library's symlink-race-protected removal on
+Linux, macOS and Windows. Counting makes a discovery pass before the removal pass;
+`deleted` reflects that discovery count, which requires an unchanged tree to be exact.
+
+`-q` prints nothing, `--json` prints what was done (`copied`, `bytes`, `unchanged`, `deleted`,
+`errors`), `--stats` the HTTP requests and bytes received.
+
+VSI moves replace existing destination files, as GDAL does, and refuse existing
+destination directories. Local filesystem renames preserve native links and names;
+copy-delete moves between stores or filesystems refuse symbolic links and non-UTF-8
+entries before copying. Keep the source unchanged during a copy-delete move.
+
+Recursive extraction and copy reject parent traversal, Windows drive-style child
+names from archives or remote/memory listings (on all platforms for portable paths), and symlinks escaping the output root. Local-to-local copies on Unix preserve legal colons and backslashes in file names. Tar and tar.gz copies and sync stream payloads in one pass after discovery. ZIP
+central directories are indexed once per operation with a bounded read buffer.
+Local file writes sync the temporary file before renaming it into place; many small files
+therefore pay one file sync each. Containment checks resolve the root and existing target
+ancestors per entry, retaining current filesystem-state checks at that cost. File sync does
+not include a directory sync and is not a complete power-loss durability guarantee.
+Tar listings expose regular files and directories; copying a tar link or other unsupported
+entry fails, or records an error with `--skip-errors`. Untimed memory targets are compared
+by content during sync. Local atomic writes follow destination
+symlinks and preserve mode bits, while replacement detaches hard links and does not
+preserve ownership, ACLs or extended attributes.
+
+HTTP directory listings reject index pages larger than 4 MiB and stop with an error
+at the object-listing page budget. Binary HTTP responses are not read as index
+pages. Recursive copy/sync refuses nested directory symlinks rather than silently creating
+an empty directory; `--skip-errors` records the refusal in its error report.
+
+Bucket/container roots are synthetic directories across S3, GCS and Azure URL forms;
+`stat` does not verify their existence or access. Listing performs that verification.
+Recursive deletes stop at the first failure and can leave a partially deleted tree or prefix;
+the error does not include a partial deletion count. Inspect the remaining entries before retrying.
+An untyped HTTP file copy currently uses three requests: a bounded 4096-byte index sniff,
+a one-byte size probe, and the payload GET. A server may send additional bytes before the
+sniff connection closes; `--stats` counts bytes consumed by Terrio, not packets on the wire.
+Credential-bearing URL queries are redacted in diagnostics and listing names.
+VSI mutation/listing operations require complete object-store listings; capped
+read-only subdirectory discovery retains its existing warning and partial results
+for readers such as Zarr.
+
+Recursive object-store listings include directories implied by keys; GDAL omits those
+implied directory entries. `--skip-errors` continues copying but exits nonzero when
+any files fail. Signed S3 file uploads read the source once to calculate its SHA-256 and once
+to send the body (twice the file size in local reads); ETag sync can add a separate MD5 pass.
+Payload hashes are retained for compatibility with signed endpoints that require them.
+
+Differences from GDAL (checked with 3.13.3): entries are sorted (GDAL prints local directories in the order
+the file system returns them); dates are UTC (a zip member's date is its stored DOS time, as
+GDAL prints it); HTTP index names stay percent-encoded, as GDAL keeps them. Not supported:
+`sync -j/--num-threads` (requests are sequential, including one S3 delete request per key), multipart uploads (objects over 5 GiB), Azure
+shared-key authentication, writing to Google Cloud Storage's own API, empty directory
+creation on destinations that cannot represent them (local directories are supported; S3 uses marker keys), progress bars, and the virtual file
+systems `/vsigzip/`, `/vsi7z/`, `/vsirar/`, `/vsiswift/`, `/vsioss/`, `/vsiadls/`, `/vsihdfs/`
+and `/vsiwebhdfs/`.
+
+Byte copies and copy-delete moves refuse pipes, sockets and devices. Recursive copies with
+`--skip-errors` report those entries and continue with regular files. ZIP member names retain
+valid UTF-8; unflagged non-UTF-8 legacy names are decoded as CP437 into Unicode. GDAL can instead emit
+raw non-UTF-8 bytes for those names.
+
 ## fill-nodata
 
 ```sh
@@ -1659,7 +1798,6 @@ a leading Byte band does not truncate later floating-point bands.
 The Rust `VirtualRaster` API parses and serializes these descriptions. Its
 `into_lazy` source map also permits filesystem-free reads in WebAssembly.
 
-
 Warped VRT block evaluation is limited to 8,388,608 samples across all bands per
 declared block. Larger blocks return an unsupported error, including for small
 subwindow reads, to keep temporary memory bounded while preserving GDAL block semantics.
@@ -1708,6 +1846,15 @@ point tie points and rotated affine transforms, without moving pixel corners.
 Writing a PixelIsPoint GeoTIFF requires a CRS. A write with an unknown CRS is
 rejected before creating the file, avoiding a half-pixel origin shift without
 a corresponding raster-type GeoKey.
+
+Remote listings limit each HTML index to 4 MiB and each object-store XML page to 16 MiB; larger pages fail explicitly.
+
+Recursive copy destinations must remain within their destination tree, including ordinary
+local copies: directory symlinks that escape it are refused. Same-device directory moves
+rename the directory without copying payloads and report zero copied files/bytes.
+Plain HTTP source discovery currently probes the directory-index URL before the file
+range request; a file can therefore cost an extra GET, usually a 404.
+
 
 Raster comparison reads TIFFTAG items, embedded RPC tags and PAM sidecar metadata
 from local filesystem inputs. HTTP and archive comparisons use the reader's

@@ -24,6 +24,7 @@ mod remote;
 #[cfg(feature = "threads")]
 mod threads;
 mod vector_dataset;
+mod vsi;
 
 use serde::Deserialize;
 use std::cell::{Cell, RefCell};

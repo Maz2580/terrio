@@ -196,6 +196,7 @@ packets when the points are written to LAS or LAZ (and the `.wdp` file next to a
 | `filter dem` | `filters.dem` | the points within a range of a raster's values, such as `Z[20:20]` |
 | `filter colorization` | `filters.colorization` | dimensions from raster bands (`Red:1:1.0, Green:2, Blue:3`) |
 | `filter overlay` | `filters.overlay` | a dimension from an attribute of the polygons of a vector layer the points are in |
+| `filter hexbin` | `filters.hexbin` | the boundary of the points: the hexagons with at least `--threshold` points, as polygons with holes (a vector dataset), and those hexagons with their counts (`--density`) |
 
 They give PDAL's results exactly, PDAL's quirks included (`filters.sample` takes the first
 point's `y` as the origin's `z`; SMRF fills empty cells with the mean of the 8 nearest as
@@ -226,6 +227,25 @@ are left out.
 Every filter takes `--a-srs` to assign a CRS to points that have none or a wrong one, as
 `terrio grid` and `terrio convert` do (PDAL's `readers.las.override_srs`).
 
+`filter hexbin` writes a vector dataset rather than points: one multipolygon feature, the union
+of the hexagons (flat-topped, of edge `--edge-length`, PDAL's `edge_length` or `edge_size`) with
+at least `--threshold` points, with its `area`, `density`, `avg_pt_spacing`, `point_count`,
+`hex_count`, `edge_length` and `threshold` as attributes; `--density` writes the hexagons with
+their counts too. Python's `PointCloud.hexbin` returns PDAL's metadata as a dictionary
+(`boundary` as WKT, `boundary_json`, `area`, `density`, `estimated_edge`...) with both layers;
+JavaScript's returns a vector dataset of both. They are PDAL's: the grid anchored at the first
+point, points assigned to hexagons as hexer assigns them (in the strips where columns of
+hexagons interlock, below the first point, hexer counts some points in the hexagon next to the
+one around them), the edge length estimated as hexer estimates it when it is not given (from
+`--sample-size` points), the boundary's coordinates rounded to `--precision` decimals and, by
+default, smoothed (simplified preserving topology, with PDAL's tolerance; its small polygons and
+holes dropped), and the area and density those of the hexagons before smoothing. Since the
+first point anchors the grid, the boundary depends on the order points are read in: COPC files
+read by PDAL's `readers.copc` and by terrio come in different orders, so give `--origin` (the
+first point PDAL reads) to get PDAL's hexagons. The boundary is always a multipolygon (PDAL's
+smoothed boundary of one polygon is a polygon); holes run clockwise (hexer's run
+counter-clockwise, as its exteriors); H3 grids (`h3_grid`) are not implemented.
+
 ```sh
 terrio filter smrf tile.laz classified.laz
 terrio filter outlier tile.laz clean.laz --method statistical --mean-k 8 --multiplier 2 --remove
@@ -237,12 +257,14 @@ terrio filter assign tile.laz fixed.laz --value "Classification = 7 WHERE Z < -1
 terrio filter crop tile.laz part.laz --polygon "POLYGON((0 0, 100 0, 50 80, 0 0))"
 terrio filter splitter tile.laz "tiles/tile_#.laz" --length 500
 terrio filter merge a.laz b.laz merged.laz
+terrio filter merge @tiles.txt merged.laz        # the inputs listed in a file, one per line
 terrio filter smrf tile.las.zip ground.laz --a-srs EPSG:2056   # a zipped LAS without a CRS
 terrio filter covariancefeatures tile.laz features.laz --feature-set Dimensionality,Omnivariance --knn 16
 terrio filter dbscan tile.laz clusters.laz --eps 2 --min-cluster-points 10
 terrio filter colorization tile.laz rgb.laz --raster ortho.tif --dimensions "Red:1, Green:2, Blue:3"
 terrio filter overlay tile.laz zoned.laz --datasource zones.gpkg --dimension Classification --column class
 terrio filter dem tile.laz near.laz --raster dem.tif --limits "Z[2:2]"
+terrio filter hexbin bridge.copc.laz footprint.geojson --edge-size 1.4 --threshold 3 --no-smooth --density hexagons.geojson
 ```
 
 ## COPC, local or remote
@@ -349,6 +371,9 @@ tiles = points.splitter(500.0)           # a list of PointClouds
 both = terrio.merge_points([points, other])
 feats = points.covariance_features(feature_set=["Linearity", "Planarity"])  # filters.covariancefeatures
 rgb = points.colorization("ortho.tif")   # filters.colorization: Red, Green, Blue
+hexbin = points.hexbin(1.4, threshold=3, smooth=False)  # filters.hexbin
+hexbin["boundary"]                       # 'MULTIPOLYGON (((...)))', as PDAL's metadata
+hexbin["hexagons"].to_geopandas()        # the hexagons with their point counts
 zoned = points.overlay("zones.gpkg", "Classification", column="class")
 points.write("tile-ept/ept.json")        # an EPT dataset
 terrio.append_points("tile-ept/ept.json", ["tile-2.laz", "tile-3.laz"])  # added in place
@@ -372,6 +397,7 @@ pc.grid(1, { method: "linear" }); // a TIN
 pc.smrf().range("Classification[2:2]");
 pc.lof(10).get("local_outlier_factor"); // filters.lof, dbscan, covarianceFeatures...
 pc.colorization(rasterDataset, "Red:1, Green:2, Blue:3");
+pc.hexbin(1.4, { threshold: 3, smooth: false }).toGeoJSON("boundary"); // filters.hexbin
 readPoints(plyBytes, "scan.ply"); // PLY and E57 bytes too
 ```
 
@@ -398,6 +424,7 @@ type) with terrio and compares:
 | Waveform samples; packets kept through LAS and LAZ | the file's bytes (LASlib's offsets) | identical |
 | SMRF, outliers (statistical, radius), range, sample, voxels, on autzen and USGS 3DEP Madison (4.07 million points) | PDAL's filters | identical classes and points |
 | PMF, CSF, ELM, HAG (nearest, Delaunay), crop, decimation, expression, assign, merge, splitter, chipper, normals, clusters, on autzen and half a million points of USGS 3DEP Madison | PDAL's filters | identical classes, heights, tiles, cluster ids and points; normals within 1e-6 |
+| Hexbin on autzen and a 300 x 300 ft crop of it (given and estimated edge lengths, thresholds 1 to 15, smoothed and not) | PDAL's `filters.hexbin` | identical hexagons and counts; the same polygons, holes and vertices (to PDAL's 8 decimals), a symmetric difference of 0 and areas within 1.2e-10 (PDAL prints 10 digits) |
 | DBSCAN, covariance features, eigenvalues, approximate coplanarity, rank, LOF, nearest-neighbour distances, radial density, reciprocity, miniball, z smoothing, skewness balancing, head, tail, sort, locate, IQR, MAD, on autzen | PDAL's filters | every value identical to the bit (PDAL's doubles read back from LAS extra bytes) but omnivariance (within 1e-15) and miniball (within 1e-9) |
 | DEM, colorization and overlay, on autzen, with rasters and polygons made from it (and a NAIP orthophoto, a USGS 3DEP DEM) | PDAL's filters | the same points; identical values |
 | TIN (linear) grids | `gdal_grid -a linear` | 99.91% of cells identical (see below) |

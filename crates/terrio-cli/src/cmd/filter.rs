@@ -1,9 +1,10 @@
 //! `terrio filter`: PDAL's point cloud filters.
 
+use terrio::formats::VectorDriver;
 use terrio::pointcloud::filters::{
     self, AssignOptions, BandDimension, ClusterOptions, CovarianceFeaturesOptions, CropBox, CropOptions, CsfOptions, DbscanOptions,
-    DimRange, EigenvaluesOptions, FeatureMode, HagOptions, Neighbourhood, NnDistanceMode, NormalOptions, OutlierMethod, OutlierOptions,
-    OverlayOptions, PmfOptions, SampleOptions, SmrfOptions, SplitterOptions, VoxelMode,
+    DimRange, EigenvaluesOptions, FeatureMode, HagOptions, HexbinOptions, Neighbourhood, NnDistanceMode, NormalOptions, OutlierMethod,
+    OutlierOptions, OverlayOptions, PmfOptions, SampleOptions, SmrfOptions, SplitterOptions, VoxelMode,
 };
 use terrio::pointcloud::{self, PointCloud, PointWriter, ReturnKind};
 
@@ -324,7 +325,7 @@ enum Filter {
     },
     /// Merge point clouds into one (PDAL's filters.merge).
     Merge {
-        /// The point clouds, then the output.
+        /// The point clouds, then the output. `@FILE` reads input paths from FILE, one per line.
         #[arg(num_args = 2.., required = true)]
         paths: Vec<String>,
         /// Assign this CRS to the points, without reprojecting (when the files have none or a
@@ -667,6 +668,56 @@ enum Filter {
         #[arg(long)]
         layer: Option<String>,
     },
+    /// Trace the boundary of the points on a grid of hexagons (PDAL's filters.hexbin), read in
+    /// chunks: the union of the hexagons with at least --threshold points, polygons with holes,
+    /// written to a vector dataset as one multipolygon feature (with its area, density, point and
+    /// hexagon counts). The grid is anchored at the first point, as PDAL's.
+    Hexbin {
+        /// The point cloud (LAS, LAZ, COPC, EPT, PLY or E57; a path, URL or `s3://` object).
+        input: String,
+        /// The boundary's vector dataset (GeoJSON, GeoPackage, FlatGeobuf...), by its extension.
+        output: String,
+        /// Assign this CRS to the points (when the file has none or a wrong one).
+        #[arg(long = "a-srs", value_name = "CRS", help_heading = "Point cloud options")]
+        a_srs: Option<String>,
+        #[command(flatten)]
+        points: super::points::PointArgs,
+        /// The hexagons' edge length (PDAL's edge_length, or edge_size). By default, estimated as
+        /// PDAL estimates it: the hexagons' height is --threshold times the mean distance between
+        /// consecutive points of the first --sample-size.
+        #[arg(long = "edge-length", visible_alias = "edge-size", value_name = "LENGTH", default_value_t = 0.0)]
+        edge_length: f64,
+        /// The points the edge length is estimated from.
+        #[arg(long = "sample-size", value_name = "N", default_value_t = 5000)]
+        sample_size: usize,
+        /// The fewest points of a hexagon in the boundary.
+        #[arg(long, default_value_t = 15)]
+        threshold: u64,
+        /// Do not smooth the boundary (PDAL's smooth=false): keep every hexagon edge.
+        #[arg(long = "no-smooth")]
+        no_smooth: bool,
+        /// When smoothing, drop polygons and holes smaller than this (by default 6 × tolerance²,
+        /// the tolerance 1.1 × √3 × edge length / 2).
+        #[arg(long = "hole-cull-area-tolerance", value_name = "AREA")]
+        hole_cull_area_tolerance: Option<f64>,
+        /// The grid's origin, a hexagon's lower-left corner (by default, the first point).
+        #[arg(long, num_args = 2, value_names = ["X", "Y"], allow_negative_numbers = true)]
+        origin: Option<Vec<f64>>,
+        /// The decimals of the boundary's coordinates (as PDAL rounds them, before smoothing).
+        #[arg(long, default_value_t = 8)]
+        precision: usize,
+        /// Also write the hexagons with at least --threshold points, with their counts, to this
+        /// vector dataset (PDAL's density).
+        #[arg(long, value_name = "OUTPUT")]
+        density: Option<String>,
+        /// The output format's short name, for the boundary and --density. By default, chosen
+        /// from each output's extension.
+        #[arg(short = 'f', long = "format")]
+        format: Option<String>,
+        /// The points read at a time (about a million by default).
+        #[arg(long = "chunk-points", value_name = "N", default_value_t = 0, help_heading = "Point cloud options")]
+        chunk_points: usize,
+    },
 }
 
 /// How the covariance filters find neighbours, besides their `knn`.
@@ -951,6 +1002,7 @@ pub fn run(a: Args) -> terrio::Result<()> {
         }
         Filter::Merge { mut paths, a_srs, points, write: w } => {
             let output = paths.pop().unwrap_or_default();
+            let paths = super::expand_file_lists(&paths)?;
             let read_opts = points.to_options()?;
             let mut clouds = paths.iter().map(|p| pointcloud::read_points(p, &read_opts)).collect::<terrio::Result<Vec<_>>>()?;
             for c in &mut clouds {
@@ -1092,6 +1144,57 @@ pub fn run(a: Args) -> terrio::Result<()> {
             let cloud = read(&io)?;
             write(&io, &filters::overlay(&cloud, layer, &OverlayOptions { dimension, column })?)
         }
+        Filter::Hexbin {
+            input,
+            output,
+            a_srs,
+            points,
+            edge_length,
+            sample_size,
+            threshold,
+            no_smooth,
+            hole_cull_area_tolerance,
+            origin,
+            precision,
+            density,
+            format,
+            chunk_points,
+        } => {
+            let options = HexbinOptions {
+                edge_length,
+                sample_size,
+                threshold,
+                smooth: !no_smooth,
+                hole_cull_area_tolerance,
+                origin: origin.map(|o| [o[0], o[1]]),
+                precision,
+                ..Default::default()
+            };
+            // Hexagons count one point at a time: read in chunks.
+            let mut binner = filters::HexBinner::new(&options)?;
+            let mut reader = pointcloud::open_points(&input)?;
+            reader.start_chunks(&points.to_options()?, chunk_points)?;
+            while let Some(mut chunk) = reader.next_chunk()? {
+                assign_srs(&a_srs, &mut chunk)?;
+                binner.add(&chunk)?;
+            }
+            if let Some(s) = &a_srs {
+                binner.set_crs(terrio::crs::SpatialRef::parse(s)?);
+            } else {
+                binner.set_crs(reader.crs().clone());
+            }
+            let result = binner.finish()?;
+            let driver = format
+                .as_deref()
+                .map(|f| VectorDriver::from_name(f).ok_or_else(|| terrio::Error::InvalidArgument(format!("unknown vector format '{f}'"))))
+                .transpose()?;
+            let write = terrio::VectorWriteOptions { driver, ..Default::default() };
+            terrio::write_vector(&[result.boundary_layer(None)], &output, &write)?;
+            if let Some(path) = density {
+                terrio::write_vector(&[result.density_layer(None)], &path, &write)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1191,6 +1294,51 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_hexbin_boundary_and_density() {
+        let dir = std::env::temp_dir().join(format!("terrio-filter-hexbin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        // A 20 x 20 grid of points 0.5 m apart, in UTM.
+        let n = 400;
+        let dims = vec![
+            Dimension::new("x", Values::F64((0..n).map(|i| 500_000.0 + 0.5 * (i % 20) as f64).collect())),
+            Dimension::new("y", Values::F64((0..n).map(|i| 3_300_000.0 + 0.5 * (i / 20) as f64).collect())),
+            Dimension::new("z", Values::F64(vec![10.0; n])),
+        ];
+        let input = path("in.las");
+        pointcloud::write_points(&PointCloud::new(dims, SpatialRef::from_epsg(32614).unwrap()), &input, &Default::default()).unwrap();
+        let (boundary, density) = (path("boundary.geojson"), path("hexagons.geojson"));
+        let argv = ["terrio", "hexbin", &input, &boundary, "--edge-size", "1.4", "--threshold", "3", "--no-smooth", "--density", &density];
+        run(Cli::try_parse_from(argv).unwrap().args).unwrap();
+        let b = terrio::open_vector(&boundary, &Default::default()).unwrap();
+        let layer = &b.layers[0];
+        assert_eq!(layer.features.len(), 1);
+        assert!(matches!(layer.features[0].geometry, Some(terrio::Geometry::MultiPolygon(_))));
+        assert_eq!(SpatialRef::from_layer(layer).epsg, Some(32614));
+        let d = terrio::open_vector(&density, &Default::default()).unwrap();
+        assert!(!d.layers[0].features.is_empty());
+        // The edge length estimated, as PDAL's (overwriting the boundary).
+        std::fs::remove_file(&boundary).unwrap();
+        run(Cli::try_parse_from(["terrio", "hexbin", &input, &boundary, "--threshold", "3"]).unwrap().args).unwrap();
+        let b = terrio::open_vector(&boundary, &Default::default()).unwrap();
+        let edge = &b.layers[0].features[0].attributes[5];
+        // hexer's height: 3 × (380 steps of 0.5 and 19 row jumps) / 400 points.
+        let height = 3.0 * (380.0 * 0.5 + 19.0 * (9.5f64 * 9.5 + 0.25).sqrt()) / 400.0;
+        assert!(matches!(edge, terrio::FieldValue::Float(e) if (*e - height / 3f64.sqrt()).abs() < 1e-9), "{edge:?}");
+        // --format applies to both outputs, whose extensions do not name a format.
+        let (boundary, density) = (path("boundary.out"), path("hexagons.out"));
+        let argv =
+            ["terrio", "hexbin", &input, &boundary, "--edge-size", "1.4", "--threshold", "3", "-f", "GeoJSON", "--density", &density];
+        run(Cli::try_parse_from(argv).unwrap().args).unwrap();
+        for (out, features) in [(&boundary, 1), (&density, d.layers[0].features.len())] {
+            let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out).unwrap()).unwrap();
+            assert_eq!(json["type"], "FeatureCollection", "{out}");
+            assert_eq!(json["features"].as_array().unwrap().len(), features, "{out}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn assigns_a_crs_to_points_without_one() {
         let dir = std::env::temp_dir().join(format!("terrio-filter-a-srs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1216,6 +1364,23 @@ mod tests {
             run(Cli::try_parse_from(argv).unwrap().args).unwrap();
             assert_eq!(pointcloud::open_points(&output).unwrap().crs().epsg, Some(2056), "{filter}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merges_point_clouds_listed_in_a_file() {
+        let dir = std::env::temp_dir().join(format!("terrio-filter-merge-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let coords = |base: f64| Values::F64((0..10).map(|i| base + i as f64).collect());
+        for (name, base) in [("a.las", 0.0), ("b.las", 100.0)] {
+            let dims = vec![Dimension::new("x", coords(base)), Dimension::new("y", coords(base)), Dimension::new("z", coords(base))];
+            pointcloud::write_points(&PointCloud::new(dims, SpatialRef::default()), &path(name), &Default::default()).unwrap();
+        }
+        std::fs::write(dir.join("list.txt"), format!("{}\n{}\n", path("a.las"), path("b.las"))).unwrap();
+        let (list, output) = (format!("@{}", path("list.txt")), path("merged.las"));
+        run(Cli::try_parse_from(["terrio", "merge", &list, &output]).unwrap().args).unwrap();
+        assert_eq!(pointcloud::read_points(&output, &Default::default()).unwrap().len(), 20);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

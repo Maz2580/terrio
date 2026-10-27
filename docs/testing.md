@@ -274,7 +274,7 @@ asked for them:
 
 | Job | Pull requests |
 | --- | --- |
-| real data vs GDAL (`ci.yml`) | Runs unless the PR changes only docs, Markdown, `js/` (other than its Rust code), `packaging/` or other workflows |
+| real data vs GDAL (`ci.yml`) | Skipped only when every changed path (renamed-from paths included) is under `docs/` or `site/`, a root-level Markdown file, `js/` (except its Rust code and `Cargo.toml`), `packaging/`, or `.github/` (except `ci.yml`), or is one of `zensical.toml`, `requirements_docs.txt`, `CITATION.cff`, `about.hbs` or `about.toml`; a PR listing 3000 or more paths always runs |
 | npm package (`ci-extended.yml`) | Label `ci:npm` or `ci:all`; the `wasm` job tests the Node.js package on every PR |
 | point clouds and conformance vs GDAL (`ci-extended.yml`) | Label `ci:conformance` or `ci:all` |
 | macOS and Windows (`ci-platforms.yml`) | Label `ci:macos`, `ci:windows` or `ci:all` |
@@ -512,6 +512,28 @@ text. These comparisons use exactly
 representable real attributes; general DBF real precision is documented in
 [the archive format policy](formats.md#shapefile-zip-output-in-memory).
 
+## Shapefile self-touching rings (#308)
+
+Esri allows a polygon ring that touches itself at a vertex to enclose a hole. Since
+3.13.0, GDAL splits such a ring into an exterior and holes in `organizePolygons`,
+for records of several parts; GDAL 3.12 keeps it as stored. Terrio reads these
+rings as GDAL 3.13 does.
+
+```sh
+cargo test -p terrio --lib shapefile
+python scripts/conformance.py ../terrio-data --only shapefile-rings --strict
+```
+
+The `shapefile-rings` suite writes 18 synthetic records with OGR (Esri holes, a
+single-part record, rings stored from inside a hole, figure-eights, spikes,
+same-direction loops, duplicate points, hole parts that are figure-eights or enclose an island, and stored holes touching
+the exterior), checks in the `.shp` that the rings are stored as given, and compares
+OGR's reading with Terrio's GeoPackage output, ISO WKB byte for byte. With GDAL 3.12
+the reference is GDAL 3.13.1's reading, frozen in the script. One case is within
+tolerance rather than identical: a hole part enclosing an island gives the same valid
+polygons, but GEOS `MakeValid` returns both rings in the other direction and from
+another start vertex.
+
 ## PMTiles decoded-byte limits (#279)
 
 With `default-features = false, features = ["tiles"]`, native and WebAssembly
@@ -738,6 +760,58 @@ python scripts/conformance.py ../terrio-data --only lazy-geotiff --strict
 `LazyRaster::rpc`, `file_list` and `sample_bits` are Rust APIs. Python and
 JavaScript exposure of these additional lazy-reader facts remains follow-up
 work; the existing bindings retain their behavior.
+
+## File management (#289)
+
+`scripts/compare_vsi_with_gdal.py` (the `vsi` conformance suite) compares `terrio vsi` with
+GDAL's `gdal vsi` (GDAL 3.13.3; the results are the same with 3.12.2 and 3.13.0): recursive long
+listings (`-lR -f json`) of the test data directory (742 entries), its three Natural Earth and
+NYC zip archives, a Zarr store and tar and tar.gz archives of it, with names, types and file
+sizes identical and dates identical to the second; trees copied, extracted from a zip and
+synchronized (with and without a trailing slash) by both tools, byte-identical; and, on a local
+S3-compatible server, the same tree uploaded (directory markers included), listed, copied
+server-side, downloaded, synchronized twice (no upload on the second run, as GDAL), deleted
+recursively without touching the sibling `data2/` and `dirkeep` keys, and the whole bucket
+refused. GDAL 3.13.3 review regressions also compare a query-bearing remote ZIP listing
+and extracted real-file bytes, and recursive S3 deletion when an exact object and its
+`prefix/` children coexist: only children are deleted, preserving the exact object and
+neighboring prefixes. File moves remove the exact source object and preserve coexisting prefix children. Recursive deletion of a lone object fails without deleting it, matching GDAL 3.13.3. A missing local destination with a trailing slash fails without creating the directory. The local suite has 25 cases. Uploading the 7-file Natural Earth tree took terrio 10 requests and GDAL 20; the
+recursive listing 3 requests each. With `--remote`, listings of public S3 (hrrrzarr), Google
+Cloud Storage (CMIP6), Azure (Daymet, with a Planetary Computer SAS token), an HTML index page
+(download.osgeo.org) and a remote zip archive compare identically; GDAL omits the directories
+implied by object keys in recursive object store listings, which terrio lists as it does for
+local directories. Listing Natural Earth's 4.9 MB remote `ne_10m_admin_0_countries.zip` takes
+terrio 4 requests and about 32 KB.
+
+A review regression fixture with an 8 MiB member served over local HTTP compares the previous
+and updated VSI paths (body bytes counted by the client): copying a stored ZIP member uses
+131 requests instead of 515, with the same 8,421,608 bytes received; listing the ZIP still uses
+4 requests and 32,885 bytes. Recursive tar.gz extraction uses 3 requests instead of 273,
+receiving 8,847,427 versus 8,847,361 bytes, including archive discovery. Both extracted members
+have the source SHA-256. These are I/O counts, not timing benchmarks. ZIP directory parsing
+uses a 64 KiB read buffer; compressed tar payload passes use a sequential response. A separate
+HTTP regression withholds the response body and checks that metadata-only stat returns from
+200 headers, preserving an unknown size when Content-Length is absent.
+
+A three-member tar fixture (a small first member, an 8 MiB incompressible member, then a
+small last member) checks targeted reads. Copying the first gzip member consumes 65,536
+response-body bytes instead of 8,880,407, with two requests in both versions; metadata stops
+at its header, and extraction makes a separate prefix pass. Copying the last plain-tar member
+uses 4 requests and 98,304 bytes instead of 131 requests and 8,421,376 bytes, because prior
+payloads are skipped with seeks. Both outputs match the source SHA-256. These client body-read
+counts exclude any transport prefetch beyond the consumed stream and are not timing claims.
+
+
+```sh
+python scripts/compare_vsi_with_gdal.py ../terrio-data --terrio target/release/terrio
+# Add --remote to compare public cloud stores and HTTP sources.
+python scripts/conformance.py ../terrio-data --only vsi
+cargo test -p terrio --lib vsi::        # listings, copies, sync, refusals, links, archives
+cargo test -p terrio-cli --test vsi     # S3 (local server): paging, uploads, ETag sync, bounded delete
+pytest python/tests/test_vsi.py
+node --test --test-name-pattern='vsi' js/tests/node.test.mjs
+```
+
 
 ## Raster query I/O (#289)
 

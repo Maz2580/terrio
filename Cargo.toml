@@ -91,6 +91,7 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+tar = { version = "0.4", default-features = false }
 # POSIX file locks for in-place SQLite updates (Unix).
 libc = "0.2"
 zip = { version = "9", default-features = false, features = ["deflate"] }
@@ -106,6 +107,9 @@ e57 = "0.11"
 delaunator = "1"
 # Data parallelism (native builds only).
 rayon = "1.10"
+# Array views of raster pixels (terrio's optional `ndarray` feature): the version the NetCDF and
+# HDF5 readers and NumPy's bindings already use.
+ndarray = "0.17"
 # The optional GDAL backend (the `gdal` feature): the only C dependency, opt-in.
 gdal = "0.19"
 gdal-sys = "0.12"

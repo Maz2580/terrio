@@ -283,8 +283,9 @@ commands. Command-group progress:
       `filters.approximatecoplanar`, `filters.estimaterank`, `filters.lof`, `filters.nndistance`,
       `filters.radialdensity`, `filters.reciprocity`, `filters.miniball`, `filters.zsmooth`,
       `filters.skewnessbalancing`, `filters.head`, `filters.tail`, `filters.sort`, `filters.locate`,
-      `filters.iqr`, `filters.mad`, `filters.dem`, `filters.colorization` and `filters.overlay`,
-      identical to PDAL's on autzen (nanoflann's neighbours, libstdc++'s sort and Eigen's
+      `filters.iqr`, `filters.mad`, `filters.dem`, `filters.colorization`, `filters.overlay` and
+      `filters.hexbin` (boundaries on hexer's hexagons; not its H3 grids), identical to PDAL's on
+      autzen (nanoflann's neighbours, libstdc++'s sort and Eigen's
       eigensolver as PDAL runs them; `terrio filter`, Python and JavaScript).
 - [ ] PDAL's long tail of filters (`filters.optimalneighborhood`, `filters.neighborclassifier`,
       `filters.radiusassign`, `filters.hag_dem`, `filters.voxelcentroidnearestneighbor`,
@@ -503,6 +504,20 @@ WebAssembly (the `terrio-js` npm package):
       including units, GIS axis normalization and explicit Helmert operations.
       Rust/CLI/MCP/Python/JavaScript/WASM validation is tracked in #270.
 - IAU and additional projection capabilities remain scoped separately in #271–#272.
+
+## ndarray interoperability (#298)
+
+The optional `ndarray` feature (off by default): raster pixels as `ndarray` arrays, without
+copying, converting or reordering them.
+
+- [x] Borrowed and mutable views of a raster's pixels (`RasterArrayExt`): `(bands, rows, cols)`
+      arrays and single bands, and mutable band views that do not overlap, for parallel updates.
+- [x] Owned transfers between datasets and `Array3`/`Array2` (`RasterDataset::into_array3`,
+      `from_array3` and their two-dimensional forms), the metadata kept in a header.
+- [x] Lazy reads: windows moved into arrays, masks read as `Array2<u8>`
+      (`LazyRaster::read_mask_array2`).
+- Out of scope: complex bands as `Complex<T>` (they are viewed as their component bands),
+  `multidim::Buffer`, and decoding into caller-provided buffers.
 
 ## Decisions
 

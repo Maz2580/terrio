@@ -162,6 +162,55 @@ def test_neighbourhood_and_ordering_filters():
     assert len(pc.iqr("Z")) == len(pc) and len(pc.mad("Z", k=1.0)) < len(pc)
 
 
+def test_hexbin():
+    # A ring of the six hexagons around an empty one, and the first point's hexagon apart: PDAL
+    # 2.10 gives two polygons, one with a hole, of 18.1865335 square units.
+    h = 3**0.5
+
+    def centre(c, r):
+        return (0.5 + 1.5 * c, h / 2 + h * r + (h / 2 if c % 2 else 0.0))
+
+    xy = [(0.0, 0.0)] + [centre(c, r) for c, r in [(1, 1), (1, 2), (2, 1), (2, 3), (3, 1), (3, 2)]]
+    pc = terrio.PointCloud.from_dict(
+        {
+            "x": np.array([p[0] for p in xy]),
+            "y": np.array([p[1] for p in xy]),
+            "z": np.zeros(len(xy)),
+        },
+        crs="EPSG:32614",
+    )
+    out = pc.hexbin(1.0, threshold=1, smooth=False)
+    assert out["boundary"].startswith("MULTIPOLYGON (((")
+    assert out["area"] == pytest.approx(18.1865335, abs=1e-6)
+    assert out["density"] == pytest.approx(7 / out["area"])
+    assert (out["point_count"], out["hex_count"], out["threshold"]) == (7, 7, 1)
+    assert out["origin"] == (0.0, 0.0)
+    assert out["boundary_json"]["type"] == "MultiPolygon"
+    polygons = out["boundary_json"]["coordinates"]
+    assert len(polygons) == 2 and sorted(len(p) - 1 for p in polygons) == [0, 1]
+    layer = out["boundary_layer"]
+    assert (
+        len(layer) == 1 and layer.geometry_type == "MultiPolygon" and "32614" in (layer.crs or "")
+    )
+    hexagons = out["hexagons"].__geo_interface__["features"]
+    assert sorted(f["properties"]["count"] for f in hexagons) == [1] * 7
+    # A threshold no hexagon reaches; no points; no edge length.
+    assert pc.hexbin(1.0, threshold=2)["boundary"] == "MULTIPOLYGON EMPTY"
+    assert pc.head(0).hexbin(1.0)["area"] == 0.0
+    with pytest.raises(terrio.InvalidArgumentError, match="edge length"):
+        pc.hexbin(-1.0)
+    # Without an edge length, PDAL's estimate: threshold x the mean distance between consecutive
+    # points (the sum over the 6 steps / 7 points), the hexagons' height.
+    steps = np.hypot(np.diff(pc["x"]), np.diff(pc["y"])).sum()
+    estimated = pc.hexbin(threshold=1, smooth=False)
+    assert estimated["estimated_edge"] == pytest.approx(steps / 7)
+    assert estimated["edge_length"] == pytest.approx(steps / 7 / h)
+    with pytest.raises(terrio.InvalidArgumentError, match="topology"):
+        pc.hexbin(1.0, preserve_topology=False)
+    # Smoothing (the default) drops the lone hexagon, smaller than 6 x tolerance².
+    assert len(pc.hexbin(1.0, threshold=1)["boundary_json"]["coordinates"]) == 1
+
+
 def test_raster_and_vector_filters(tmp_path):
     pc = make_points()
     # A plane z = 100 + x / 10 over the points, two bands; and two squares of zones.

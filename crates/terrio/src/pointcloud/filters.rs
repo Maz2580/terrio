@@ -8,13 +8,14 @@
 //! `filters.normal`, `filters.cluster`, `filters.dbscan`, `filters.covariancefeatures`,
 //! `filters.eigenvalues`, `filters.approximatecoplanar`, `filters.estimaterank`,
 //! `filters.lof`, `filters.nndistance`, `filters.radialdensity`, `filters.reciprocity`,
-//! `filters.miniball`, `filters.zsmooth`, `filters.dem`, `filters.colorization` and
-//! `filters.overlay`, with PDAL's options, defaults and results.
+//! `filters.miniball`, `filters.zsmooth`, `filters.dem`, `filters.colorization`,
+//! `filters.overlay` and `filters.hexbin`, with PDAL's options, defaults and results.
 
 mod csf;
 pub mod expr;
 mod features;
 mod ground;
+mod hexbin;
 mod neighbourhood;
 mod overlay;
 mod select;
@@ -26,6 +27,7 @@ pub use features::{
     cluster, covariance_features, eigenvalues, estimate_rank, normal,
 };
 pub use ground::{HagOptions, PmfOptions, elm, hag_delaunay, hag_nn, pmf, pmf_classes, skewness_balancing};
+pub use hexbin::{HexBinner, Hexagon, Hexbin, HexbinOptions, hexbin};
 pub use neighbourhood::{DbscanOptions, NnDistanceMode, dbscan, lof, miniball, nndistance, radial_density, reciprocity, zsmooth};
 pub use overlay::{BandDimension, OverlayOptions, colorization, dem, overlay};
 pub use select::{

@@ -26,6 +26,8 @@ Suites:
     vector-ops        ogr2ogr options, rasterize, polygonize (compare_vector_ops_with_gdal.py)
     analysis-output   zonal/point-sampling output reprojection and decimal rounding
     footprint         raster footprints, source/custom fields and singleparts vs GDAL
+    vsi               terrio vsi list/copy/sync/move/delete vs gdal vsi, locally, in archives and on S3
+                      (compare_vsi_with_gdal.py)
     topology          buffer, polygon overlay/dissolve, validity, repair and cleanup vs GEOS
     vector-dataset    concat, partition, set-field-type, make-point, create, export-schema, rename-layer, edit, update
     vector-geom       simplify, segmentize, hulls, swap-xy, set-geom-type, combine and sort vs
@@ -495,6 +497,56 @@ def suite_raster_manage(ctx):
         suite.cases.append(Case("raster management", result["name"], result["status"], result["detail"]))
     if not results or (code and not any(case.status == DIFFERS for case in suite.cases)):
         suite.error = tail(err or out) or f"comparison exited {code} without complete results"
+    return suite
+
+
+def suite_vsi(ctx):
+    """File management (list, copy, sync, move, delete) against gdal vsi on real files."""
+    suite = Suite("vsi", "File management (vsi)", "GDAL gdal vsi",
+                  "Recursive long listings of the test data, real zip archives, a Zarr store and tar archives of it; "
+                  "trees copied, extracted and synchronized by both tools; uploads, listings, server-side copies, "
+                  "re-syncs and bounded deletions on a local S3-compatible server; with --remote, public S3, GCS, "
+                  "Azure (SAS) and HTTP index listings and a remote zip archive. Names, types and file sizes exactly, "
+                  "dates to the second, copied bytes by SHA-256.")
+    if shutil.which("gdal") is None:
+        suite.skipped = "needs GDAL's gdal command (3.12 or later)"
+        return suite
+    cmd = [sys.executable, str(SCRIPTS / "compare_vsi_with_gdal.py"), ctx.data, "--terrio", ctx.terrio, "--json"]
+    if ctx.remote:
+        cmd.append("--remote")
+    code, out, err = run(cmd)
+    try:
+        results = json.loads(out)
+    except json.JSONDecodeError:
+        suite.error = tail(err or out) or f"comparison exited {code} without valid JSON"
+        return suite
+    for result in results:
+        suite.cases.append(Case("vsi", result["name"], result["status"], result["detail"]))
+    if code and not any(case.status == DIFFERS for case in suite.cases):
+        suite.error = tail(err or out) or f"exit {code}"
+    return suite
+
+
+def suite_shapefile_rings(ctx):
+    """Self-touching Shapefile polygon rings, split as GDAL 3.13 does (#308)."""
+    suite = Suite("shapefile-rings", "Shapefile self-touching rings", "GDAL/OGR (3.13.1 reading frozen for GDAL 3.12)",
+                  "18 synthetic records written by OGR, read by OGR and converted by terrio to GeoPackage. "
+                  "Identical: the same ISO WKB bytes. Within tolerance: equal under GEOS and both valid, with rings "
+                  "in another direction or from another start. GDAL 3.12 keeps these rings as stored; with it, "
+                  "terrio is compared with GDAL 3.13.1's reading, frozen in the script.")
+    if missing_modules("osgeo"):
+        suite.skipped = "needs GDAL Python bindings"
+        return suite
+    code, out, err = run([sys.executable, str(SCRIPTS / "compare_shapefile_rings_with_gdal.py"), "--terrio", ctx.terrio, "--json"])
+    try:
+        results = json.loads(out)
+    except json.JSONDecodeError:
+        suite.error = tail(err or out)
+        return suite
+    for result in results:
+        suite.cases.append(Case("Shapefile rings", result["name"], result["status"], result["detail"]))
+    if code and not any(case.status == DIFFERS for case in suite.cases):
+        suite.error = tail(err or out) or f"exit {code}"
     return suite
 
 
@@ -1672,6 +1724,8 @@ SUITES = OrderedDict(
         ("vector-roundtrip", suite_vector_roundtrip),
         ("cad", suite_cad),
         ("shapefile-archives", suite_shapefile_archives),
+        ("vsi", suite_vsi),
+        ("shapefile-rings", suite_shapefile_rings),
         ("raster-roundtrip", suite_raster_roundtrip),
         ("windows", suite_windows),
         ("ops", suite_ops),
@@ -1901,7 +1955,7 @@ def main():
 
     def go(name):
         start = datetime.datetime.now()
-        if gdal_missing and name not in ("pointclouds", "crs"):
+        if gdal_missing and name not in ("pointclouds", "crs", "vsi"):
             fn = SUITES[name]
             s = Suite(name, name, "", fn.__doc__ or "")
             s.skipped = "needs the Python modules " + ", ".join(gdal_missing)

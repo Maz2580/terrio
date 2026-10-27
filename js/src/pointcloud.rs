@@ -92,6 +92,32 @@ fn parse<T: for<'de> Deserialize<'de> + Default>(options: JsValue) -> Result<T, 
     serde_json::from_str(&text).map_err(|e| JsError::new(&format!("options: {e}")))
 }
 
+/// Options of `PointCloud.hexbin`, as a JavaScript object (PDAL's `filters.hexbin` options).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct JsHexbinOptions {
+    sample_size: usize,
+    threshold: u64,
+    smooth: bool,
+    hole_cull_area_tolerance: Option<f64>,
+    origin: Option<[f64; 2]>,
+    precision: usize,
+}
+
+impl Default for JsHexbinOptions {
+    fn default() -> Self {
+        let d = filters::HexbinOptions::default();
+        Self {
+            sample_size: d.sample_size,
+            threshold: d.threshold,
+            smooth: d.smooth,
+            hole_cull_area_tolerance: None,
+            origin: None,
+            precision: d.precision,
+        }
+    }
+}
+
 /// Options of `PointCloud.smrf`, as a JavaScript object (PDAL's `filters.smrf` options).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
@@ -616,6 +642,32 @@ impl JsPointCloud {
     /// neighbours (`miniball`), as PDAL's `filters.miniball` (`knn` 8 by default).
     pub fn miniball(&self, knn: Option<usize>) -> Result<JsPointCloud, JsError> {
         Ok(JsPointCloud { inner: filters::miniball(&self.inner, knn.unwrap_or(8)).map_err(js_err)? })
+    }
+
+    /// The boundary of the points on a grid of hexagons of edge `edgeLength`, as PDAL's
+    /// `filters.hexbin` (the grid anchored at the first point; an edge length of 0 estimates it
+    /// from the first `sampleSize` points, as PDAL does): a vector dataset of two layers,
+    /// `boundary` (one multipolygon feature, the union of the hexagons with at least `threshold`
+    /// points, with its `area`, `density`, `avg_pt_spacing`, `point_count`, `hex_count`,
+    /// `edge_length` and `threshold`) and `hexagons` (those hexagons with their `column`, `row`
+    /// and point `count`). `options`: `sampleSize` (5000 by default), `threshold` (15 by
+    /// default), `smooth` (true by default),
+    /// `holeCullAreaTolerance`, `origin` (`[x, y]`), `precision` (the decimals of the boundary's
+    /// coordinates, 8 by default, as PDAL's).
+    pub fn hexbin(&self, edge_length: f64, options: JsValue) -> Result<Dataset, JsError> {
+        let o: JsHexbinOptions = parse(options)?;
+        let options = filters::HexbinOptions {
+            edge_length,
+            sample_size: o.sample_size,
+            threshold: o.threshold,
+            smooth: o.smooth,
+            hole_cull_area_tolerance: o.hole_cull_area_tolerance,
+            origin: o.origin,
+            precision: o.precision,
+            ..Default::default()
+        };
+        let r = filters::hexbin(&self.inner, &options).map_err(js_err)?;
+        Ok(Dataset::from_layers(vec![r.boundary_layer(None), r.density_layer(None)], terrio::formats::VectorDriver::GeoJSON))
     }
 
     /// Smoothed elevations in a dimension, as PDAL's `filters.zsmooth` (`radius` 1 and

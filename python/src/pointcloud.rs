@@ -8,8 +8,8 @@ use pyo3::types::{PyDict, PyList};
 use terrio::crs::SpatialRef;
 use terrio::pointcloud::filters::{
     self, AssignOptions, BandDimension, ClusterOptions, CovarianceFeaturesOptions, CropBox, CropOptions, CsfOptions, DbscanOptions,
-    DimRange, EigenvaluesOptions, FeatureMode, HagOptions, Neighbourhood, NnDistanceMode, NormalOptions, OutlierMethod, OutlierOptions,
-    OverlayOptions, PmfOptions, SampleOptions, SmrfOptions, SplitterOptions, VoxelMode,
+    DimRange, EigenvaluesOptions, FeatureMode, HagOptions, HexbinOptions, Neighbourhood, NnDistanceMode, NormalOptions, OutlierMethod,
+    OutlierOptions, OverlayOptions, PmfOptions, SampleOptions, SmrfOptions, SplitterOptions, VoxelMode,
 };
 use terrio::pointcloud::grid::{GridMethod, GridOptions, GridStat};
 use terrio::pointcloud::{
@@ -1769,6 +1769,82 @@ impl PyPointCloud {
         let layer = layer_arg(py, datasource, layer)?;
         let o = OverlayOptions { dimension, column };
         Ok(Self { inner: py.detach(|| filters::overlay(&self.inner, &layer, &o)).py()? })
+    }
+
+    /// The boundary of the points on a grid of hexagons, as PDAL's `filters.hexbin`: the union
+    /// of the hexagons with at least `threshold` points, as polygons with holes, with PDAL's
+    /// metadata. The grid is anchored at the first point (the lower-left corner of its
+    /// hexagon), as PDAL's.
+    ///
+    /// Args:
+    ///     edge_length: The hexagons' edge length (PDAL's `edge_length`, or `edge_size`). By
+    ///         default (or 0), estimated as PDAL estimates it: the hexagons' height is
+    ///         `threshold` times the mean distance between consecutive points of the first
+    ///         `sample_size`.
+    ///     sample_size: The points the edge length is estimated from. 5000 by default.
+    ///     threshold: The fewest points of a hexagon in the boundary. 15 by default.
+    ///     smooth: Simplify the boundary (tolerance `1.1 × √3 × edge_length / 2`, preserving
+    ///         topology) and drop polygons and holes smaller than `hole_cull_area_tolerance`.
+    ///         True by default, as PDAL's.
+    ///     preserve_topology: Must be True when smoothing (the only simplification implemented).
+    ///     hole_cull_area_tolerance: By default, `6 × tolerance²`.
+    ///     origin: The grid's origin `(x, y)`, a hexagon's lower-left corner. By default, the
+    ///         first point.
+    ///     precision: The decimals the boundary's coordinates are rounded to (before smoothing,
+    ///         as PDAL rounds them), and the significant digits of `boundary`'s, as PDAL's. 8 by
+    ///         default.
+    ///
+    /// Returns:
+    ///     dict: `boundary` (WKT `MULTIPOLYGON`, `MULTIPOLYGON EMPTY` when no hexagon has enough
+    ///     points), `boundary_json` (its GeoJSON geometry), `area`, `density` (all the points
+    ///     over the area), `avg_pt_spacing`, `point_count`, `hex_count`, `edge_length` (the
+    ///     one given or estimated),
+    ///     `estimated_edge` (PDAL's name for the hexagons' height, `√3 × edge_length`),
+    ///     `threshold`, `origin`, `boundary_layer` (a `Layer` of the boundary with these values
+    ///     as attributes) and `hexagons` (a `Layer` of the hexagons with at least `threshold`
+    ///     points, with their `column`, `row` and point `count`: PDAL's `density` output).
+    #[pyo3(signature = (edge_length=None, *, sample_size=5000, threshold=15, smooth=true, preserve_topology=true, hole_cull_area_tolerance=None, origin=None, precision=8))]
+    #[allow(clippy::too_many_arguments)]
+    fn hexbin<'py>(
+        &self,
+        py: Python<'py>,
+        edge_length: Option<f64>,
+        sample_size: usize,
+        threshold: u64,
+        smooth: bool,
+        preserve_topology: bool,
+        hole_cull_area_tolerance: Option<f64>,
+        origin: Option<(f64, f64)>,
+        precision: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let o = HexbinOptions {
+            edge_length: edge_length.unwrap_or(0.0),
+            sample_size,
+            threshold,
+            smooth,
+            preserve_topology,
+            hole_cull_area_tolerance,
+            origin: origin.map(|o| [o.0, o.1]),
+            precision,
+        };
+        let r = py.detach(|| filters::hexbin(&self.inner, &o)).py()?;
+        let boundary_layer = r.boundary_layer(None);
+        let geojson = py.import("json")?.call_method1("loads", (wbvector::geojson::to_string(&boundary_layer),))?;
+        let d = PyDict::new(py);
+        d.set_item("boundary", r.boundary_wkt(precision))?;
+        d.set_item("boundary_json", geojson.get_item("features")?.get_item(0)?.get_item("geometry")?)?;
+        d.set_item("area", r.area)?;
+        d.set_item("density", r.density)?;
+        d.set_item("avg_pt_spacing", r.avg_pt_spacing)?;
+        d.set_item("point_count", r.point_count)?;
+        d.set_item("hex_count", r.hexagons.len())?;
+        d.set_item("edge_length", r.edge_length)?;
+        d.set_item("estimated_edge", r.height())?;
+        d.set_item("threshold", r.threshold)?;
+        d.set_item("origin", (r.origin[0], r.origin[1]))?;
+        d.set_item("boundary_layer", crate::vector::PyLayer { inner: boundary_layer })?;
+        d.set_item("hexagons", crate::vector::PyLayer { inner: r.density_layer(None) })?;
+        Ok(d)
     }
 
     /// The points as a vector layer, one point feature each, with the dimensions as attributes.

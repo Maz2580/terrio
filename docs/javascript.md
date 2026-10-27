@@ -408,3 +408,32 @@ updated. Without errorThreshold it reports the proposed affine change without
 applying it. `updateRaster(source, destinationBytes, options)` returns updated
 GeoTIFF bytes and supports resampling, clipping geometry and overview refresh.
 Byte inputs/results are materialized; large-file editing should use native APIs.
+
+## File management
+
+```javascript
+terrio.vsiWrite("/vsimem/data/a.zip", zipBytes);
+terrio.vsiList("/vsizip//vsimem/data/a.zip", { recursive: true });  // [{name, type, size, ...}]
+const shp = terrio.vsiRead("/vsizip//vsimem/data/a.zip/roads.shp");
+terrio.vsiCopy("/vsimem/data", "/vsimem/backup", { recursive: true });
+terrio.vsiSync("/vsimem/data/", "/vsimem/mirror", { recursive: true, strategy: "overwrite" });
+terrio.vsiMove("/vsimem/backup", "/vsimem/old");
+terrio.vsiDelete("/vsimem/old", { recursive: true });
+// Remote listings through fetch: public S3 buckets, Google Cloud Storage, Azure (SAS URLs) and
+// HTML index pages. Returns {entries, requests, bytes}.
+const { entries } = await terrio.listUrl("s3://bucket/prefix", { recursive: true });
+```
+
+The [vsi](cli.md#vsi) commands support the in-memory file system (`/vsimem/`) and the zip archives in
+it, and `listUrl` provides remote listings. WebAssembly has no local file system (local paths fail)
+and no request signing: tar archives, local files, signed S3 requests and writes to object stores
+are available in the native CLI, Rust and Python only. `/vsimem/` files carry no dates, so
+`vsiSync` compares content when an in-memory endpoint lacks a timestamp. In browsers, a store must allow the
+page's origin (CORS) for `listUrl`.
+
+HTML index responses use a readable byte stream, a 4 KiB sniff prefix and a 4 MiB body
+limit, matching the native path. Binary/ordinary web content is refused; custom `fetch`
+implementations must return a standard `Response`. Object-store XML pagination is unchanged.
+
+VSI listing bindings return structured flat entries. Nested tree presentation (`--tree`)
+is currently available through the CLI; JSON serialization flags apply to CLI output.
