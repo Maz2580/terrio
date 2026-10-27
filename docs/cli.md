@@ -1517,7 +1517,8 @@ an empty directory; `--skip-errors` records the refusal in its error report.
 
 Bucket/container roots are synthetic directories across S3, GCS and Azure URL forms;
 `stat` does not verify their existence or access. Listing performs that verification.
-Recursive deletes stop at the first failure and can leave a partially deleted tree or prefix;
+Recursive deletes stop at the first failure (on S3, after the first failing batch of up to
+1,000 keys, all of which were attempted) and can leave a partially deleted tree or prefix;
 the error does not include a partial deletion count. Inspect the remaining entries before retrying.
 A plain HTTP URL is first requested for one byte when it is copied, synchronized or described
 without a trailing `/`: a response typed other than HTML is a file, so a copy uses two
@@ -1525,6 +1526,9 @@ requests (that probe and the payload GET), also from servers that ignore `Range`
 untyped response, or a missing one, is then probed as an index page (a bounded 4096-byte sniff
 of `URL/`), so an untyped file copy uses three requests; a directory named without its `/`
 costs that one extra request. Listings, and URLs ending with `/`, fetch the index page first.
+On a server that has both an object `dir` typed other than HTML and an index page at `dir/`
+(possible with object-store-backed HTTP), `dir` names the object, as in GDAL; `dir/` names
+the directory.
 A server may send additional bytes before the sniff connection closes; `--stats` counts bytes
 consumed by Terrio, not packets on the wire. The requests of one command share connections
 (and TLS sessions) to a host, and a remote archive's members are read through one reader and
@@ -1543,8 +1547,9 @@ send the body (twice the file size in local reads). Uploads staged through a tem
 ETag sync can add a separate MD5 pass. Payload hashes are retained (no `UNSIGNED-PAYLOAD`) for
 compatibility with signed endpoints that require them. Recursive S3 deletion sends up to 1,000
 keys per `DeleteObjects` request, reporting the first key the service could not delete; a
-service that answers that it does not implement it (400, 405, 501) is sent one `DELETE` per
-key, as are keys with control characters, which XML cannot carry, in their order. Azure blobs are deleted one request each.
+service that answers that it does not implement it (405, 501, or 400 `NotImplemented`) is sent
+one `DELETE` per key, as are keys with control characters, which XML cannot carry, between the
+batches around them. Azure blobs are deleted one request each.
 
 Differences from GDAL (checked with 3.13.3): entries are sorted (GDAL prints local directories in the order
 the file system returns them); dates are UTC (a zip member's date is its stored DOS time, as

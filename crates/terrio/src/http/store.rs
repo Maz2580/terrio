@@ -354,8 +354,8 @@ enum Accept {
     Success,
     /// 2xx, and 404 (a missing object).
     Missing,
-    /// Any status.
-    Any,
+    /// 2xx, and the statuses of a request the service does not implement (400, 405, 501).
+    Unimplemented,
 }
 
 /// Sends a write request (`PUT`, `DELETE`, `POST`) for an object: S3 objects signed when
@@ -496,7 +496,10 @@ fn write_request_with(
         let _ = response.into_body().into_reader().take(1 << 20).read_to_end(&mut body);
         super::REQUESTS.fetch_add(1, Ordering::Relaxed);
         super::BYTES.fetch_add(body.len() as u64, Ordering::Relaxed);
-        if (200..300).contains(&status) || accept == Accept::Any || (accept == Accept::Missing && status == 404) {
+        if (200..300).contains(&status)
+            || (accept == Accept::Missing && status == 404)
+            || (accept == Accept::Unimplemented && matches!(status, 400 | 405 | 501))
+        {
             return Ok(Reply { status, body });
         }
         let text = String::from_utf8_lossy(&body[..body.len().min(300)]).into_owned();
@@ -570,7 +573,8 @@ pub(crate) fn delete(remote: &Remote) -> Result<()> {
 /// The most keys of one `DeleteObjects` request, S3's limit.
 const MAX_DELETE_KEYS: usize = 1000;
 
-/// Deletes objects of an S3 bucket, in order: up to 1000 keys per `DeleteObjects` request
+/// Deletes objects of an S3 bucket, request after request in order (S3 does not define the order
+/// of the keys within one request): up to 1000 keys per `DeleteObjects` request
 /// (`POST ?delete`). A key XML cannot carry (a control character) is deleted with a request of its
 /// own, between the batches before and after it, as is every key once the service answers that
 /// it does not implement multi-object deletion (some S3-compatible services do not). Missing
@@ -603,8 +607,8 @@ pub(crate) fn delete_objects(bucket: &str, keys: &[String]) -> Result<()> {
 }
 
 /// One `DeleteObjects` request, in quiet mode (only failures are reported). `false` when the
-/// service does not implement it: 400, 405 or 501, or a success without a `DeleteResult`. Other
-/// statuses (after retries) are errors.
+/// service does not implement it: 405, 501 or a 400 whose code says so, or a success without a
+/// `DeleteResult`. Other statuses (after retries) are errors.
 fn delete_batch(bucket: &str, keys: &[&str]) -> Result<bool> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8"?><Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>true</Quiet>"#,
@@ -618,15 +622,23 @@ fn delete_batch(bucket: &str, keys: &[&str]) -> Result<bool> {
     md5.update(&body);
     let headers = [("content-md5".to_string(), base64(&md5.finish())), ("content-type".to_string(), "application/xml".to_string())];
     let bucket_url = Remote::S3(S3Object { bucket: bucket.to_string(), key: String::new() });
-    let reply = write_request("POST", &bucket_url, "?delete", &headers, Payload::Bytes(body), Accept::Any)?;
+    let reply = write_request("POST", &bucket_url, "?delete", &headers, Payload::Bytes(body), Accept::Unimplemented)?;
     let text = String::from_utf8_lossy(&reply.body);
-    match reply.status {
-        200..300 if text.contains("<DeleteResult") => {}
-        200..300 | 400 | 405 | 501 => return Ok(false),
-        status => {
-            let text: String = text.chars().take(300).collect();
-            return Err(Error::Http(format!("DeleteObjects s3://{bucket}: status {status}: {}", text.trim())));
+    let code = crate::vsi::listing::xml_elements(&text, "Code").first().map(|c| c.trim().to_string()).unwrap_or_default();
+    let unimplemented = match reply.status {
+        200..300 => !text.contains("<DeleteResult"),
+        400 => matches!(code.as_str(), "NotImplemented" | "MethodNotAllowed"),
+        _ => true,
+    };
+    if unimplemented {
+        if HttpOptions::from_env().log {
+            eprintln!("terrio: DeleteObjects s3://{bucket} -> {} {code}: deleting one key per request", reply.status);
         }
+        return Ok(false);
+    }
+    if !(200..300).contains(&reply.status) {
+        let text: String = text.chars().take(300).collect();
+        return Err(Error::Http(format!("POST s3://{bucket}/?delete: status {}: {}", reply.status, text.trim())));
     }
     // Missing keys are deleted already (some services report them).
     let failed: Vec<(String, String)> = crate::vsi::listing::xml_elements(&text, "Error")
