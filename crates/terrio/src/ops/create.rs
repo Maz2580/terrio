@@ -68,6 +68,9 @@ fn plan(like: Option<&LazyRaster>, o: &CreateOptions) -> Result<(RasterDataset, 
     if bands == 0 {
         return Err(Error::InvalidArgument("the raster to create needs a band".into()));
     }
+    if (o.copy_metadata || o.copy_overviews) && like.is_none() {
+        return Err(Error::InvalidArgument("copying metadata or overviews needs a template (like)".into()));
+    }
     let data_type = o.data_type.or(like.map(|l| l.data_type())).unwrap_or(DataType::U8);
     let nodata = if o.unset_nodata { None } else { o.nodata.or(like.and_then(|l| l.nodata())) };
     let crs = o.crs.clone().unwrap_or_else(|| like.map(|l| l.crs()).unwrap_or_default());
@@ -242,6 +245,15 @@ mod tests {
             assert!(!created.has_geo_transform(), "{name}");
             assert_eq!(created.header().gcps, like.header().gcps, "{name}");
             assert_eq!(created.header().gcps.len(), opts.gcps.len(), "{name}");
+        }
+    }
+
+    #[test]
+    fn copy_options_need_a_template() {
+        for o in [CreateOptions { copy_metadata: true, ..Default::default() }, CreateOptions { copy_overviews: true, ..Default::default() }]
+        {
+            let o = CreateOptions { size: Some((2, 2)), ..o };
+            assert!(matches!(create_raster(None, &o), Err(Error::InvalidArgument(_))));
         }
     }
 

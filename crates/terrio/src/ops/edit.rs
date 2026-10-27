@@ -111,6 +111,14 @@ fn validate(o: &EditOptions) -> Result<()> {
     {
         return Err(Error::InvalidArgument("the bounding box is not xmin,ymin,xmax,ymax".into()));
     }
+    if let Some(gt) = o.geo_transform
+        && (!gt.iter().all(|v| v.is_finite()) || gt[1] * gt[5] - gt[2] * gt[4] == 0.0)
+    {
+        return Err(Error::InvalidArgument("the geotransform needs finite values and a non-zero pixel size".into()));
+    }
+    if o.gcps.iter().any(|g| ![g.pixel, g.line, g.x, g.y, g.z].iter().all(|v| v.is_finite())) {
+        return Err(Error::InvalidArgument("ground control points need finite values".into()));
+    }
     Ok(())
 }
 
@@ -609,7 +617,8 @@ fn move_report(src: &LazyRaster, o: &MoveOptions) -> Result<MoveReport> {
             ((pc - c).powi(2) + (pl - l).powi(2)).sqrt()
         })
         .collect();
-    let max_error = errors.iter().copied().fold(0.0, f64::max);
+    // A NaN error (a corner the transform cannot place) counts as unbounded.
+    let max_error = errors.iter().copied().fold(0.0, |m, e| if e.is_nan() { f64::INFINITY } else { m.max(e) });
     let updated = o.error_threshold.is_some_and(|e| e > max_error);
     Ok(MoveReport { geo_transform: new_gt, corners, errors, max_error, updated })
 }
@@ -644,6 +653,17 @@ mod tests {
             assert!(matches!(&err, Error::Unsupported(m) if m.contains(reason)), "{err}");
         }
         assert!(move_raster_bytes(&tiff(&gw::TiffOptions::default()), &o).unwrap().1.updated);
+    }
+
+    #[test]
+    fn non_finite_or_singular_georeferencing_is_refused() {
+        let bytes = tiff(&gw::TiffOptions::default());
+        for gt in [[f64::NAN, 1.0, 0.0, 0.0, 0.0, -1.0], [0.0, 0.0, 0.0, 0.0, 0.0, -1.0]] {
+            let o = EditOptions { geo_transform: Some(gt), ..Default::default() };
+            assert!(matches!(edit_raster_bytes(&bytes, &o), Err(Error::InvalidArgument(_))), "{gt:?}");
+        }
+        let gcps = vec![Gcp { x: f64::INFINITY, ..Default::default() }];
+        assert!(matches!(edit_raster_bytes(&bytes, &EditOptions { gcps, ..Default::default() }), Err(Error::InvalidArgument(_))));
     }
 
     #[test]
