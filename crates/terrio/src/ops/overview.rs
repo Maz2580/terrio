@@ -934,16 +934,20 @@ struct Held<'c> {
     rows: usize,
     data: Option<std::borrow::Cow<'c, RasterData>>,
     mask: Option<std::borrow::Cow<'c, [u8]>>,
+    /// Which full-resolution sources [`Held::fill`] reads: the image, the mask.
+    read_data: bool,
+    read_mask: bool,
 }
 
 impl Held<'_> {
     /// Reads full-resolution rows up to `end`, keeping the rows from `keep` held: whole blocks of
     /// `block` rows, and about [`Sources::read_bytes`] of values at a time.
-    fn fill(&mut self, srcs: &mut Sources, keep: usize, end: usize, block: usize, data: bool, mask: bool) -> Result<()> {
+    fn fill(&mut self, srcs: &mut Sources, keep: usize, end: usize, block: usize) -> Result<()> {
         let held = self.start + self.rows;
         if end <= held {
             return Ok(());
         }
+        let (data, mask) = (self.read_data, self.read_mask);
         let (w, h, bands) = (srcs.src.width(), srcs.src.height(), srcs.src.band_count());
         let from = keep.max(self.start).min(held);
         let read_from = held.max(keep);
@@ -1072,17 +1076,23 @@ fn run_jobs(
     // mask's overview for a previous level), else the alpha band, else the nodata value.
     let use_mask = |l: &WholeLevel| l.method != OverviewResampling::Nearest && (prev.is_some() || l.mask.is_some() || has_mask);
     let block = srcs.src.block_size().map_or(1, |b| b.1.max(1));
-    let (mut held, read_data, read_mask) = match prev {
-        Some(p) => (
-            Held { start: 0, rows: p.size.1, data: Some(std::borrow::Cow::Borrowed(&p.data)), mask: p.mask.as_deref().map(Into::into) },
-            false,
-            false,
-        ),
-        None => (
-            Held { start: 0, rows: 0, data: None, mask: None },
-            jobs.iter().any(|j| !j.mask),
-            jobs.iter().any(|j| j.mask || use_mask(&levels[j.level])),
-        ),
+    let mut held = match prev {
+        Some(p) => Held {
+            start: 0,
+            rows: p.size.1,
+            data: Some(std::borrow::Cow::Borrowed(&p.data)),
+            mask: p.mask.as_deref().map(Into::into),
+            read_data: false,
+            read_mask: false,
+        },
+        None => Held {
+            start: 0,
+            rows: 0,
+            data: None,
+            mask: None,
+            read_data: jobs.iter().any(|j| !j.mask),
+            read_mask: jobs.iter().any(|j| j.mask || use_mask(&levels[j.level])),
+        },
     };
     let job_steps: Vec<_> = jobs
         .iter()
@@ -1109,9 +1119,8 @@ fn run_jobs(
         let keep = (0..jobs.len()).filter_map(|j| pending(&at, j)).map(|s| s.0.start).min().unwrap_or(0);
         let (rows, out_rows) = job_steps[j][at[j]].clone();
         at[j] += 1;
-        if prev.is_none() {
-            held.fill(srcs, keep, rows.end, block, read_data, read_mask)?;
-        }
+        // The previous level is held whole.
+        held.fill(srcs, keep, rows.end, block)?;
         let (job, l) = (jobs[j], &levels[jobs[j].level]);
         let band = |values: &[f64], valid: Option<&[bool]>, t: &kernel::Target| {
             let band = kernel::Band { values, valid, width: w, height: src_size.1, rows: rows.clone() };
@@ -1715,6 +1724,60 @@ mod tests {
         let (a, _) = sources.rows(None, (2, 2), 0..2, None, false).unwrap();
         let (b, _) = sources.rows(None, (2, 2), 0..2, None, false).unwrap();
         assert!(std::sync::Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn whole_levels_convert_every_type_and_method_as_whole_reads() {
+        // Every method, in types whose work types and conversions differ.
+        let (w, h) = (300, 211);
+        let sizes = [(150, 106), (75, 53), (19, 14)];
+        let blocks = [(64, 64); 3];
+        let methods = [
+            OverviewResampling::Nearest,
+            OverviewResampling::Average,
+            OverviewResampling::Mode,
+            OverviewResampling::Min,
+            OverviewResampling::Max,
+        ];
+        for (data_type, nodata) in [(DataType::U8, 0.0), (DataType::I16, -7.0), (DataType::U16, 3.0), (DataType::F32, -1.5)] {
+            let values: Vec<f64> = (0..w * h)
+                .map(|i| match data_type {
+                    _ if i % 11 == 4 => nodata,
+                    DataType::U8 => (i * 31 % 251) as f64,
+                    DataType::I16 => (i * 37 % 4001) as f64 - 2000.0,
+                    DataType::U16 => (i * 41 % 60001) as f64,
+                    _ => (i * 43 % 1009) as f64 * 0.37 - 100.0,
+                })
+                .collect();
+            let config = wbraster::RasterConfig { cols: w, rows: h, bands: 2, data_type, nodata, ..Default::default() };
+            let doubled: Vec<f64> = values.iter().chain(values.iter().rev()).copied().collect();
+            let raster = wbraster::Raster::from_data(config, doubled).unwrap();
+            let options = gw::TiffOptions { tile_size: Some(64), nodata: Some(nodata), ..Default::default() };
+            let tiff = gw::encode(&raster, &options).unwrap();
+            for method in methods {
+                for multiband in [false, true] {
+                    let (data, masks) = schedules((w, h), (64, 64), &sizes, &blocks, method, data_type, multiband, false);
+                    let mut whole = LazyRaster::from_tiff_bytes(tiff.clone()).unwrap().unwrap();
+                    let mut srcs = Sources { src: &mut whole, base: None, alpha: None, read_bytes: READ_BYTES };
+                    let mut expected: Vec<Computed> = Vec::new();
+                    for (k, &size) in sizes.iter().enumerate() {
+                        let c = compute(&mut srcs, size, 0..size.1, expected.last(), method, data[k], masks[k], 0).unwrap();
+                        expected.push(c);
+                    }
+                    let mut src = LazyRaster::from_tiff_bytes(tiff.clone()).unwrap().unwrap();
+                    let plan: Vec<WholeLevel> =
+                        sizes.iter().enumerate().map(|(k, &size)| WholeLevel { size, method, data: data[k], mask: masks[k] }).collect();
+                    // Reads of 64 rows.
+                    let mut srcs = Sources { src: &mut src, base: None, alpha: None, read_bytes: 1 };
+                    whole_levels(&mut srcs, &plan, |_, k, c| {
+                        assert_eq!(c.data.data_type(), data_type);
+                        assert_eq!(c.data.to_f64_vec(), expected[k].data.to_f64_vec(), "{data_type:?} {method:?} {multiband} level {k}");
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            }
+        }
     }
 
     /// A raster read by window that records the windows of its full-resolution reads: `(mask,
