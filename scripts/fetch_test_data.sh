@@ -256,7 +256,7 @@ done
 [ -e pointcloud/waveform/full_waveform_tutorial_data.las ] || curl -sSfL -o pointcloud/waveform/full_waveform_tutorial_data.las \
   https://nerc-arf-dan.pml.ac.uk/files/full_waveform_tutorial_data.LAS
 
-if command -v ogr2ogr >/dev/null && command -v gdal_translate >/dev/null; then
+if command -v ogr2ogr >/dev/null && command -v gdal_translate >/dev/null && command -v gdalwarp >/dev/null; then
   [ -e countries.gpkg ] || ogr2ogr -f GPKG countries.gpkg countries.geojson -nln countries
   [ -e countries.parquet ] || ogr2ogr -f Parquet countries.parquet countries.geojson
   [ -e countries.kml ] || ogr2ogr -f KML countries.kml countries.geojson

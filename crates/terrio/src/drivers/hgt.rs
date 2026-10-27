@@ -87,8 +87,8 @@ pub(crate) fn read(path: &Path) -> Result<RasterDataset> {
     let bad = || Error::InvalidData(format!("{}: not an SRTM HGT tile", path.display()));
     let (name, ext) = name_and_extension(path).ok_or_else(bad)?;
     let (lat, lon) = tile_origin(name).ok_or_else(bad)?;
+    let (cols, rows, data_type) = grid(std::fs::metadata(path)?.len()).ok_or_else(bad)?;
     let bytes = std::fs::read(path)?;
-    let (cols, rows, data_type) = grid(bytes.len() as u64).ok_or_else(bad)?;
     let layout = Layout { cols, rows, bands: 1, data_type, little_endian: false, interleave: Interleave::Bsq, offset: 0, bottom_up: false };
     let data = common::decode(&bytes, &layout)?;
     let (dx, dy) = (1.0 / (cols - 1) as f64, 1.0 / (rows - 1) as f64);
@@ -130,6 +130,17 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
         crate::warnings::warn(
             "The corner coordinates of the source are not properly aligned on plain latitude/longitude boundaries.".into(),
         );
+    }
+    // GDAL does not check this: cells of another size are read back over one degree all the same.
+    let one_degree = |cell: f64, n: usize| (cell * (n - 1) as f64 - 1.0).abs() <= 1e-9;
+    if !one_degree(r.cell_size_x, r.cols) || !one_degree(r.cell_size_y, r.rows) {
+        crate::warnings::warn(format!(
+            "The source cells do not span one degree ({} x {} degrees for {}x{} cells): the SRTM HGT tile is read back as a one-degree tile.",
+            r.cell_size_x * (r.cols - 1) as f64,
+            r.cell_size_y * (r.rows - 1) as f64,
+            r.cols,
+            r.rows
+        ));
     }
     let expected = format!(
         "{}{:02}{}{:03}.HGT",
@@ -258,6 +269,18 @@ mod tests {
         let b = std::fs::read(&p).unwrap();
         let at = |i: usize| i16::from_be_bytes([b[2 * i], b[2 * i + 1]]);
         assert_eq!((at(0), at(1), at(2), at(3)), (-32768, 0, i16::MAX, 2));
+    }
+
+    #[test]
+    fn warns_when_cells_do_not_span_a_degree() {
+        let d = 2.0 / 1200.0;
+        let gt = [-120.0 - d / 2.0, d, 0.0, 39.0 + d / 2.0, 0.0, -d];
+        let r = common::make_raster(1201, 1201, 1, RasterData::I16(vec![0; 1201 * 1201]), gt, CrsInfo::from_epsg(4326), None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        crate::warnings::take();
+        write(&r, None, &dir.path().join("N37W120.hgt")).unwrap();
+        let warnings = crate::warnings::take();
+        assert!(warnings.iter().any(|w| w.starts_with("The source cells do not span one degree")), "{warnings:?}");
     }
 
     #[test]
