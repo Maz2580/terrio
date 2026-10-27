@@ -29,7 +29,6 @@ pub(crate) fn open(path: &Path) -> Result<RawRaster> {
         return Err(Error::Unsupported(format!("{}: only binary Idrisi files are supported", rdc.display())));
     }
     let (cols, rows) = (int("columns").ok_or_else(|| bad("columns"))?, int("rows").ok_or_else(|| bad("rows"))?);
-    // RGB24 is stored blue, green, red by pixel.
     let layout = Layout { cols, rows, bands, data_type, little_endian: true, interleave: Interleave::Bip, offset: 0, bottom_up: false };
     let (x0, x1, y0, y1) = (
         num("min. x").unwrap_or(0.0),
