@@ -8,6 +8,7 @@
 use super::common::{self, Interleave, Layout};
 use crate::formats::RasterDriver;
 use crate::{Error, RasterDataset, Result};
+use std::io::Read;
 use std::path::Path;
 use wbraster::{CrsInfo, DataType, Raster};
 
@@ -76,9 +77,8 @@ pub(crate) fn is_hgt(path: &Path) -> bool {
         return false;
     }
     let mut magic = [0u8; 15];
-    let hfa =
-        std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic)).is_ok() && &magic == b"EHFA_HEADER_TAG";
-    !hfa
+    let is_hfa = std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && &magic == b"EHFA_HEADER_TAG";
+    !is_hfa
 }
 
 /// Reads an SRTM tile, georeferenced as GDAL does: WGS 84, cell centres on whole degrees at the

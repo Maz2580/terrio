@@ -256,7 +256,7 @@ done
 [ -e pointcloud/waveform/full_waveform_tutorial_data.las ] || curl -sSfL -o pointcloud/waveform/full_waveform_tutorial_data.las \
   https://nerc-arf-dan.pml.ac.uk/files/full_waveform_tutorial_data.LAS
 
-if command -v ogr2ogr >/dev/null && command -v gdal_translate >/dev/null && command -v gdalwarp >/dev/null; then
+if command -v ogr2ogr >/dev/null && command -v gdal_translate >/dev/null; then
   [ -e countries.gpkg ] || ogr2ogr -f GPKG countries.gpkg countries.geojson -nln countries
   [ -e countries.parquet ] || ogr2ogr -f Parquet countries.parquet countries.geojson
   [ -e countries.kml ] || ogr2ogr -f KML countries.kml countries.geojson
@@ -314,7 +314,7 @@ if command -v ogr2ogr >/dev/null && command -v gdal_translate >/dev/null && comm
     gdal_translate -q -of Zarr -co COMPRESS=BLOSC -co BLOSC_CNAME=lz4 srtm_sub.tif srtm_sub_blosc.zarr
   fi
   # A 3" SRTM HGT tile (1201 x 1201 cells centred on the degree lines), resampled from srtm90.tif.
-  if [ ! -e N37W120.hgt ]; then
+  if [ ! -e N37W120.hgt ] && command -v gdalwarp >/dev/null; then
     gdalwarp -q -overwrite -te -120.000416666666667 36.999583333333333 -118.999583333333333 38.000416666666667 \
       -ts 1201 1201 -r bilinear srtm90.tif N37W120_tile.tif
     gdal_translate -q -of SRTMHGT N37W120_tile.tif N37W120.hgt && rm -f N37W120_tile.tif N37W120.hgt.aux.xml
