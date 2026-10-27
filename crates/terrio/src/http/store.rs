@@ -582,19 +582,20 @@ const MAX_DELETE_KEYS: usize = 1000;
 pub(crate) fn delete_objects(bucket: &str, keys: &[String]) -> Result<()> {
     let one = |key: &str| delete(&Remote::S3(S3Object { bucket: bucket.to_string(), key: key.to_string() }));
     let mut multi = true;
-    let mut batch: Vec<&str> = Vec::new();
+    // The pending keys, with their XML text.
+    let mut batch: Vec<(&str, String)> = Vec::new();
     // Sends the pending batch; one request per key from the first refusal on, as before.
-    let flush = |batch: &mut Vec<&str>, multi: &mut bool| -> Result<()> {
+    let flush = |batch: &mut Vec<(&str, String)>, multi: &mut bool| -> Result<()> {
         if !batch.is_empty() && !(*multi && delete_batch(bucket, batch)?) {
             *multi = false;
-            batch.iter().try_for_each(|k| one(k))?;
+            batch.iter().try_for_each(|(k, _)| one(k))?;
         }
         batch.clear();
         Ok(())
     };
     for key in keys {
-        if multi && xml_key(key).is_some() {
-            batch.push(key);
+        if let Some(xml) = xml_key(key).filter(|_| multi) {
+            batch.push((key, xml));
             if batch.len() == MAX_DELETE_KEYS {
                 flush(&mut batch, &mut multi)?;
             }
@@ -609,12 +610,12 @@ pub(crate) fn delete_objects(bucket: &str, keys: &[String]) -> Result<()> {
 /// One `DeleteObjects` request, in quiet mode (only failures are reported). `false` when the
 /// service does not implement it: 405, 501 or a 400 whose code says so, or a success without a
 /// `DeleteResult`. Other statuses (after retries) are errors.
-fn delete_batch(bucket: &str, keys: &[&str]) -> Result<bool> {
+fn delete_batch(bucket: &str, keys: &[(&str, String)]) -> Result<bool> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8"?><Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>true</Quiet>"#,
     );
-    for key in keys {
-        xml += &format!("<Object><Key>{}</Key></Object>", xml_key(key).unwrap_or_default());
+    for (_, key) in keys {
+        xml += &format!("<Object><Key>{key}</Key></Object>");
     }
     xml += "</Delete>";
     let body = xml.into_bytes();
@@ -628,7 +629,9 @@ fn delete_batch(bucket: &str, keys: &[&str]) -> Result<bool> {
     let unimplemented = match reply.status {
         200..300 => !text.contains("<DeleteResult"),
         400 => matches!(code.as_str(), "NotImplemented" | "MethodNotAllowed"),
-        _ => true,
+        // The only other statuses write_request returns for this request.
+        405 | 501 => true,
+        _ => false,
     };
     if unimplemented {
         if HttpOptions::from_env().log {

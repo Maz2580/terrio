@@ -1053,13 +1053,15 @@ fn copy_tar_entries<R: Read>(entries: tar::Entries<'_, R>, inner: &str, out: &mu
     Err(not_found(inner))
 }
 
-/// Restricts the last HTML page and archive caches to one public operation, including error
-/// exits; its HTTP requests share one agent (and its connections).
-struct HtmlCacheScope {
+/// The scope of one public operation, including error exits: it clears the last HTML index page
+/// and the archive index and reader on entry and exit, and its HTTP requests share one agent (and
+/// its connections). A nested operation (the delete of a copy-delete move) clears the caches
+/// again, at the cost of refetching; the agent stays shared.
+struct OperationScope {
     #[cfg(remote)]
     _agent: crate::http::AgentScope,
 }
-impl HtmlCacheScope {
+impl OperationScope {
     fn new() -> Self {
         forget_html_page();
         forget_archive();
@@ -1069,7 +1071,7 @@ impl HtmlCacheScope {
         }
     }
 }
-impl Drop for HtmlCacheScope {
+impl Drop for OperationScope {
     fn drop(&mut self) {
         forget_html_page();
         forget_archive();
@@ -1113,7 +1115,7 @@ fn read_into(node: &Node, out: &mut dyn Write) -> Result<u64> {
 
 /// Reads a whole file into memory.
 pub fn read(path: &str) -> Result<Vec<u8>> {
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let mut out = Vec::new();
     read_into(&Node::parse(path)?, &mut out)?;
     Ok(out)
@@ -1121,7 +1123,7 @@ pub fn read(path: &str) -> Result<Vec<u8>> {
 
 /// Writes bytes to a file (local, in memory, or an object), replacing it.
 pub fn write(path: &str, bytes: &[u8]) -> Result<()> {
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let node = Node::parse(path)?;
     if let Some(reason) = node.read_only_reason() {
         return Err(Error::Unsupported(format!("'{}': {reason}", listing::redact_url(path))));
@@ -1386,7 +1388,7 @@ pub fn list(path: &str, options: &ListOptions) -> Result<Vec<Entry>> {
 }
 
 fn list_inner(path: &str, options: &ListOptions) -> Result<(bool, Vec<Entry>)> {
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let node = Node::parse(path)?;
     let stat = stat_input(path, &node, true)?.ok_or_else(|| not_found(path))?;
     if !stat.dir {
@@ -1531,7 +1533,7 @@ fn absolute_name(path: &str, node: &Node, name: &str) -> String {
 
 /// Describes one location, or `None` when nothing is there.
 pub fn stat(path: &str) -> Result<Option<Entry>> {
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let node = Node::parse(path)?;
     Ok(stat_input(path, &node, false)?.map(|s| s.entry(listing::redact_url(path.trim()).into_owned())))
 }
@@ -1549,7 +1551,7 @@ fn copy_target(src: &Node, dst_input: &str, dst: &Node) -> Result<Node> {
 /// an existing directory, to `dst` otherwise. Archive members can be copied out; object stores
 /// copy within S3 server-side.
 pub fn copy(src: &str, dst: &str, options: &CopyOptions) -> Result<Report> {
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let src_node = Node::parse(src)?;
     let dst_node = Node::parse(dst)?;
     let stat = stat_input(src, &src_node, false)?.ok_or_else(|| not_found(src))?;
@@ -1959,7 +1961,7 @@ fn md5_of(node: &Node) -> Result<String> {
 /// Deletes a file, or with `recursive` a directory and everything below it, as `gdal vsi delete`
 /// does. Refuses dangerous targets (see the [module documentation](self)).
 pub fn delete(path: &str, recursive: bool) -> Result<Report> {
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let node = Node::parse(path)?;
     check_deletable(path, &node, "delete")?;
     let mut report = Report::default();
@@ -2111,7 +2113,7 @@ fn check_copy_move_source(node: &Node) -> Result<()> {
 /// fallbacks refuse symbolic links and non-UTF-8 names they cannot faithfully preserve.
 /// Sources must not be changed concurrently during a copy-delete move.
 pub fn rename(src: &str, dst: &str) -> Result<Report> {
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let src_node = Node::parse(src)?;
     let dst_node = Node::parse(dst)?;
     check_deletable(src, &src_node, "move")?;
@@ -2193,7 +2195,7 @@ pub fn rename(src: &str, dst: &str) -> Result<Report> {
 /// out of date in the target, and deletes nothing. A source directory named with a trailing `/`
 /// has its contents synchronized into `dst`; without one, it is synchronized to `dst/<name>`.
 pub fn sync(src: &str, dst: &str, options: &SyncOptions) -> Result<Report> {
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let src_node = Node::parse(src)?;
     let dst_node = Node::parse(dst)?;
     let stat = stat_input(src, &src_node, false)?.ok_or_else(|| not_found(src))?;

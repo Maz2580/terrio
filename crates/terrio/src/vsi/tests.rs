@@ -858,7 +858,7 @@ fn recursive_delete_keeps_outside_files_during_symlink_replacement() {
 #[test]
 fn nested_http_listing_failure_redacts_query_credentials() {
     use std::io::{BufRead, BufReader};
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}/root", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
@@ -892,7 +892,7 @@ fn nested_http_listing_failure_redacts_query_credentials() {
 #[test]
 fn html_listing_keeps_query_out_of_subdirectory_urls() {
     use std::io::{BufRead, BufReader};
-    let _cache = HtmlCacheScope::new();
+    let _cache = OperationScope::new();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}/root", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
