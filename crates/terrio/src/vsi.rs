@@ -1252,12 +1252,12 @@ fn copy_file(src: &Node, dst: &Node, known_size: Option<u64>) -> Result<u64> {
 }
 
 /// Uploads the bytes `fill` writes, through a temporary file. They are hashed as they are written
-/// for an S3 upload, whose signature covers them, so that the file is read once, to send it.
+/// for a signed S3 upload, whose signature covers them, so that the file is read once, to send it.
 #[cfg(remote)]
 fn upload_spooled(remote: &crate::http::Remote, fill: impl FnOnce(&mut dyn Write) -> Result<u64>) -> Result<u64> {
     use crate::http::store;
     let mut tmp = tempfile::NamedTempFile::new()?;
-    let (n, sha256) = if matches!(remote, crate::http::Remote::S3(_)) {
+    let (n, sha256) = if matches!(remote, crate::http::Remote::S3(_)) && crate::s3::Credentials::from_env().is_some() {
         let mut out = store::HashingWriter::new(tmp.as_file_mut());
         let n = fill(&mut out)?;
         (n, Some(out.finish()))

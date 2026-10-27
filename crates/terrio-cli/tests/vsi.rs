@@ -551,17 +551,20 @@ fn recursive_deletes_send_up_to_1000_keys_per_request() {
         }
         s.objects.insert("bkt/many/sub/".into(), (Vec::new(), 1));
         s.objects.insert("bkt/many/a&b <c>\nd".into(), (b"x".to_vec(), 1));
+        // XML cannot carry it: deleted alone, between the batches before and after it.
+        s.objects.insert("bkt/many/ctl\u{1}".into(), (b"x".to_vec(), 1));
         s.objects.insert("bkt/many2/keep".into(), (b"k".to_vec(), 1));
         s.log.clear();
     }
     let deleted = ok(&endpoint, tmp.path(), &["vsi", "delete", "-r", "--json", "s3://bkt/many"]);
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&deleted).unwrap()["deleted"], 1501);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&deleted).unwrap()["deleted"], 1502);
     let s = store.lock().unwrap();
     assert_eq!(s.objects.keys().collect::<Vec<_>>(), ["bkt/many2/keep"]);
-    // 1501 objects and 2 directory markers: 2 requests (before: one DELETE per key, 1503).
-    let posts = s.log.iter().filter(|l| l.starts_with("POST")).count();
-    assert_eq!(posts, 2, "{:?}", s.log);
-    assert!(!s.log.iter().any(|l| l.starts_with("DELETE")));
+    // 1502 objects and 2 directory markers: 3 batches and 1 DELETE, in key order (before: one
+    // DELETE per key, 1504).
+    let deletes: Vec<&String> = s.log.iter().filter(|l| l.starts_with("POST") || l.starts_with("DELETE")).collect();
+    assert_eq!(deletes.len(), 4, "{deletes:?}");
+    assert!(deletes[0].starts_with("POST") && deletes[1].starts_with("DELETE /bkt/many/ctl"), "{deletes:?}");
     assert_eq!((s.missing_md5, s.unsigned), (0, 0));
 }
 

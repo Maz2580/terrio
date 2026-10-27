@@ -1543,8 +1543,8 @@ send the body (twice the file size in local reads). Uploads staged through a tem
 ETag sync can add a separate MD5 pass. Payload hashes are retained (no `UNSIGNED-PAYLOAD`) for
 compatibility with signed endpoints that require them. Recursive S3 deletion sends up to 1,000
 keys per `DeleteObjects` request, reporting the first key the service could not delete; a
-service that does not implement it is sent one `DELETE` per key, as are keys with control
-characters, which XML cannot carry. Azure blobs are deleted one request each.
+service that answers that it does not implement it (400, 405, 501) is sent one `DELETE` per
+key, as are keys with control characters, which XML cannot carry, in their order. Azure blobs are deleted one request each.
 
 Differences from GDAL (checked with 3.13.3): entries are sorted (GDAL prints local directories in the order
 the file system returns them); dates are UTC (a zip member's date is its stored DOS time, as

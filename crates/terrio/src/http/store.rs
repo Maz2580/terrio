@@ -572,26 +572,39 @@ const MAX_DELETE_KEYS: usize = 1000;
 
 /// Deletes objects of an S3 bucket, in order: up to 1000 keys per `DeleteObjects` request
 /// (`POST ?delete`). A key XML cannot carry (a control character) is deleted with a request of its
-/// own, as is every key once the service refuses multi-object deletion (some S3-compatible
-/// services do not implement it). Missing objects are not errors; a key the service fails to
-/// delete is, after its batch.
+/// own, between the batches before and after it, as is every key once the service answers that
+/// it does not implement multi-object deletion (some S3-compatible services do not). Missing
+/// objects are not errors; a key the service fails to delete is, after its batch.
 pub(crate) fn delete_objects(bucket: &str, keys: &[String]) -> Result<()> {
     let one = |key: &str| delete(&Remote::S3(S3Object { bucket: bucket.to_string(), key: key.to_string() }));
     let mut multi = true;
-    for chunk in keys.chunks(MAX_DELETE_KEYS) {
-        let (batch, single): (Vec<&str>, Vec<&str>) = chunk.iter().map(String::as_str).partition(|k| multi && xml_key(k).is_some());
-        if !batch.is_empty() && !delete_batch(bucket, &batch)? {
-            // Not implemented: one request per key from here on, as before.
-            multi = false;
+    let mut batch: Vec<&str> = Vec::new();
+    // Sends the pending batch; one request per key from the first refusal on, as before.
+    let flush = |batch: &mut Vec<&str>, multi: &mut bool| -> Result<()> {
+        if !batch.is_empty() && !(*multi && delete_batch(bucket, batch)?) {
+            *multi = false;
             batch.iter().try_for_each(|k| one(k))?;
         }
-        single.iter().try_for_each(|k| one(k))?;
+        batch.clear();
+        Ok(())
+    };
+    for key in keys {
+        if multi && xml_key(key).is_some() {
+            batch.push(key);
+            if batch.len() == MAX_DELETE_KEYS {
+                flush(&mut batch, &mut multi)?;
+            }
+        } else {
+            flush(&mut batch, &mut multi)?;
+            one(key)?;
+        }
     }
-    Ok(())
+    flush(&mut batch, &mut multi)
 }
 
 /// One `DeleteObjects` request, in quiet mode (only failures are reported). `false` when the
-/// service does not answer it with a `DeleteResult`.
+/// service does not implement it: 400, 405 or 501, or a success without a `DeleteResult`. Other
+/// statuses (after retries) are errors.
 fn delete_batch(bucket: &str, keys: &[&str]) -> Result<bool> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8"?><Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>true</Quiet>"#,
@@ -607,8 +620,13 @@ fn delete_batch(bucket: &str, keys: &[&str]) -> Result<bool> {
     let bucket_url = Remote::S3(S3Object { bucket: bucket.to_string(), key: String::new() });
     let reply = write_request("POST", &bucket_url, "?delete", &headers, Payload::Bytes(body), Accept::Any)?;
     let text = String::from_utf8_lossy(&reply.body);
-    if !(200..300).contains(&reply.status) || !text.contains("<DeleteResult") {
-        return Ok(false);
+    match reply.status {
+        200..300 if text.contains("<DeleteResult") => {}
+        200..300 | 400 | 405 | 501 => return Ok(false),
+        status => {
+            let text: String = text.chars().take(300).collect();
+            return Err(Error::Http(format!("DeleteObjects s3://{bucket}: status {status}: {}", text.trim())));
+        }
     }
     // Missing keys are deleted already (some services report them).
     let failed: Vec<(String, String)> = crate::vsi::listing::xml_elements(&text, "Error")
