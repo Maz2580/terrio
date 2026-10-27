@@ -1,4 +1,4 @@
-//! `terrio edit`: edit a GeoTIFF in place (GDAL's `gdal raster edit` and `gdal_edit.py`), or move
+//! `terrio edit-raster`: edit a GeoTIFF in place (GDAL's `gdal raster edit` and `gdal_edit.py`), or move
 //! its georeferencing to another CRS (`gdalmove.py`).
 
 use super::rasterout::parse_bbox;
@@ -55,7 +55,7 @@ pub struct Args {
     #[arg(long)]
     hist: bool,
     /// Move the georeferencing to this CRS without resampling (gdalmove.py's `-t_srs`).
-    #[arg(long, conflicts_with_all = ["crs", "bbox", "geotransform", "gcp"])]
+    #[arg(long, conflicts_with_all = ["crs", "bbox", "geotransform", "gcp", "nodata", "unset_nodata", "metadata", "unset_metadata", "unset_all_metadata", "stats", "approx_stats", "unset_stats", "hist"])]
     t_srs: Option<String>,
     /// With --t-srs, the raster's CRS, overriding its own.
     #[arg(long, requires = "t_srs")]

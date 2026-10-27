@@ -1801,3 +1801,30 @@ test("vector dataset commands: rename, edit and key update preserve source datas
   assert.equal(renamed.info().layers[0].feature_count, 2);
   assert.throws(() => terrio.editVector(original, {metadata: ["A=B"]}), /unknown field/);
 });
+
+test("raster management: create, overviews and update bytes", () => {
+  const target = terrio.createRaster(null, {size: [64, 64], ot: "Float32", burn: [7], crs: "EPSG:3857", bbox: [0, 0, 64, 64]});
+  let bytes = terrio.addOverviews(target.toBytes("target.tif"), {levels: [2, 4], resampling: "average", compression: "DEFLATE"});
+  assert.deepEqual(terrio.open(bytes, "target.tif").overviews, [[32, 32], [16, 16]]);
+  bytes = terrio.refreshOverviews(bytes, {bbox: [[0, 0, 32, 32]]});
+  const source = terrio.createRaster(null, {size: [16, 16], ot: "Float32", burn: [3], crs: "EPSG:3857", bbox: [16, 32, 32, 48]});
+  bytes = terrio.updateRaster(source, bytes);
+  const updated = terrio.open(bytes, "target.tif");
+  assert.equal(updated.readBand(1)[16 * 64 + 16], 3);
+  assert.equal(updated.readBand(1)[0], 7);
+  assert.deepEqual(updated.overviews, [[32, 32], [16, 16]]);
+  assert.deepEqual(terrio.open(terrio.deleteOverviews(bytes), "target.tif").overviews, []);
+  const histogram = updated.info(false, true).bands[0].histogram;
+  assert.ok(histogram.buckets.reduce((a, b) => a + b, 0) > 0);
+});
+
+test("raster management edit and move preserve pixel values", () => {
+  const original = terrio.createRaster(null, {size: [8, 6], burn: [7], crs: "EPSG:3857", bbox: [0, 0, 8, 6]}).toBytes("input.tif");
+  const edited = terrio.editRaster(original, {nodata: 255, metadata: {SOURCE: "A & <B>"}, stats: true});
+  assert.deepEqual(terrio.open(edited, "edited.tif").readBand(1), terrio.open(original, "input.tif").readBand(1));
+  const moved = terrio.moveRaster(edited, {tSrs: "EPSG:3857", errorThreshold: 0.01});
+  assert.equal(moved.report.updated, true);
+  assert.ok(moved.report.maxError < 1e-10);
+  assert.deepEqual(terrio.open(moved.bytes, "moved.tif").readBand(1), terrio.open(original, "input.tif").readBand(1));
+  assert.throws(() => terrio.editRaster(original, {histogram: true}), /sidecar/);
+});

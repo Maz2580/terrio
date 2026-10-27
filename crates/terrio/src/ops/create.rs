@@ -50,6 +50,8 @@ pub struct CreateOptions {
     pub copy_metadata: bool,
     /// Build the template's overview levels (GeoTIFF outputs), computed from the burnt values.
     pub copy_overviews: bool,
+    /// Replace an existing output after validating the creation parameters.
+    pub overwrite: bool,
 }
 
 /// The header (a dataset without pixels) and fill values of the raster to create.
@@ -141,11 +143,26 @@ fn fill_band(data: &mut RasterData, range: std::ops::Range<usize>, v: f64) {
 /// `like` is the template's path. With `copy_overviews`, the template's overview levels are built
 /// (nearest), for GeoTIFF outputs.
 pub fn create_raster_file(path: &str, like: Option<&str>, options: &CreateOptions, write: &RasterWriteOptions) -> Result<()> {
-    if std::path::Path::new(path).exists() {
+    let template = like.map(crate::open_raster_lazy).transpose()?;
+    create_raster_file_from_template(path, template.as_ref(), options, write)
+}
+
+/// Creates a raster file from an already-open template without materializing its pixels.
+pub fn create_raster_file_from_template(
+    path: &str,
+    template: Option<&LazyRaster>,
+    options: &CreateOptions,
+    write: &RasterWriteOptions,
+) -> Result<()> {
+    if std::path::Path::new(path).exists() && !options.overwrite {
         return Err(Error::InvalidArgument(format!("'{path}' exists: remove it first, or allow overwriting")));
     }
-    let template = like.map(crate::open_raster_lazy).transpose()?;
-    let (mut header, fill) = plan(template.as_ref(), options)?;
+    if options.copy_overviews
+        && write.driver.or_else(|| crate::formats::RasterDriver::for_extension(path)) != Some(crate::formats::RasterDriver::GTiff)
+    {
+        return Err(Error::Unsupported("copy-overviews requires a GeoTIFF output".into()));
+    }
+    let (mut header, fill) = plan(template, options)?;
     let mut write = write.clone();
     if header.raster.metadata.iter().any(|(k, _)| k == NOT_GEOREFERENCED) {
         header.raster.metadata.retain(|(k, _)| k != NOT_GEOREFERENCED);
@@ -166,7 +183,7 @@ pub fn create_raster_file(path: &str, like: Option<&str>, options: &CreateOption
     }
     out.finish()?;
     if options.copy_overviews
-        && let Some(t) = &template
+        && let Some(t) = template
         && !t.overviews().is_empty()
     {
         let full = (t.width(), t.height());

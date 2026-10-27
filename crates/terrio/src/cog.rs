@@ -451,7 +451,16 @@ impl LazyRaster {
 
     /// [`LazyRaster::from_tiff_bytes`] with other decoding limits than the defaults.
     pub fn from_tiff_bytes_with_limits(bytes: Vec<u8>, limits: TiffReadLimits) -> Result<Option<Self>> {
-        let mut source = Source::Memory(std::io::Cursor::new(SharedBytes(std::sync::Arc::new(bytes))));
+        Self::from_tiff_shared_bytes_with_limits(std::sync::Arc::new(bytes), limits)
+    }
+
+    /// Opens GeoTIFF bytes shared by immutable readers without copying the file buffer.
+    pub fn from_tiff_shared_bytes(bytes: std::sync::Arc<Vec<u8>>) -> Result<Option<Self>> {
+        Self::from_tiff_shared_bytes_with_limits(bytes, TiffReadLimits::default())
+    }
+
+    fn from_tiff_shared_bytes_with_limits(bytes: std::sync::Arc<Vec<u8>>, limits: TiffReadLimits) -> Result<Option<Self>> {
+        let mut source = Source::Memory(std::io::Cursor::new(SharedBytes(bytes)));
         if !is_tiff(&mut source) {
             return Ok(None);
         }

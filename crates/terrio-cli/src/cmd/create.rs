@@ -1,4 +1,4 @@
-//! `terrio create`: create a raster from scratch or like a template (GDAL's `gdal raster create`
+//! `terrio create-raster`: create a raster from scratch or like a template (GDAL's `gdal raster create`
 //! and `gdal_create`).
 
 use super::edit::parse_nodata;
@@ -82,9 +82,7 @@ pub fn run(a: Args) -> terrio::Result<()> {
         metadata: super::convert::key_values(&a.metadata)?.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         copy_metadata: a.copy_metadata,
         copy_overviews: a.copy_overviews,
+        overwrite: a.overwrite,
     };
-    if a.overwrite && std::path::Path::new(&a.output).is_file() {
-        std::fs::remove_file(&a.output)?;
-    }
     super::quiet(|| create_raster_file(&a.output, a.like.as_deref(), &o, &a.out.options()?))
 }

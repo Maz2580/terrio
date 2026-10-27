@@ -369,3 +369,21 @@ Optional `srs` defaults to EPSG:4326, `pixelOffset`/`lineOffset` to 0, and steps
 the explicit `geolocation` option supplies arrays for the first source. The operation remains
 pure Rust in full and core WASM builds. See [CLI warping](cli.md#warp) for invalid coordinates,
 antimeridian handling and boundary differences from GDAL.
+
+### Raster management
+
+`createRaster(like, options)` returns a raster Dataset. Options include size,
+bandCount, ot, crs, bbox, nodata, unsetNodata, burn, metadata and copyMetadata.
+Encode it with `toBytes("output.tif")`; `addOverviews(bytes, options)`,
+`refreshOverviews(bytes, options)` and `deleteOverviews(bytes, options)` return
+updated GeoTIFF bytes. External overview files are unavailable for byte inputs.
+
+`editRaster(bytes, options)` changes CRS, geotransform, bbox, GCPs, nodata,
+metadata or statistics without resampling. Options use camelCase; GCPs are
+[pixel, line, x, y, z] arrays. Histogram storage needs a sidecar and is refused.
+`moveRaster(bytes, {tSrs, sSrs, errorThreshold, ignoreCogLayoutBreak})` returns
+{bytes, report}; report contains geotransform, corners, errors, maxError and
+updated. Without errorThreshold it reports the proposed affine change without
+applying it. `updateRaster(source, destinationBytes, options)` returns updated
+GeoTIFF bytes and supports resampling, clipping geometry and overview refresh.
+Byte inputs/results are materialized; large-file editing should use native APIs.

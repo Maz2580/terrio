@@ -66,11 +66,20 @@ pub fn update_raster(src: &mut LazyRaster, dst: &str, options: &UpdateOptions) -
 
 /// [`update_raster`] into a GeoTIFF held in memory: returns the updated file.
 pub fn update_raster_bytes(src: &mut LazyRaster, dst: &[u8], options: &UpdateOptions) -> Result<Vec<u8>> {
+    update_raster_bytes_owned(src, dst.to_vec(), options)
+}
+
+/// Owned-buffer update: shares the input with its lazy reader, retaining at most the
+/// immutable reader and writable output file buffers at each stage.
+pub fn update_raster_bytes_owned(src: &mut LazyRaster, dst: Vec<u8>, options: &UpdateOptions) -> Result<Vec<u8>> {
+    let bytes = std::sync::Arc::new(dst);
     let mut target =
-        LazyRaster::from_tiff_bytes(dst.to_vec())?.ok_or_else(|| Error::InvalidData("the destination is not a TIFF".into()))?;
-    let mut out = std::io::Cursor::new(dst.to_vec());
+        LazyRaster::from_tiff_shared_bytes(bytes.clone())?.ok_or_else(|| Error::InvalidData("the destination is not a TIFF".into()))?;
+    let mut out = std::io::Cursor::new(bytes.as_ref().clone());
+    drop(bytes);
     let window = update_tiff(&mut out, &mut target, src, options)?;
     let mut bytes = out.into_inner();
+    drop(target);
     if let Some((_, extent)) = window.filter(|_| !options.no_update_overviews) {
         let mut updated = LazyRaster::from_tiff_bytes(bytes.clone())?.ok_or_else(|| Error::InvalidData("not a TIFF".into()))?;
         if !updated.overviews().is_empty() {
@@ -134,6 +143,16 @@ fn covered_window(dst: &LazyRaster, src: &LazyRaster) -> Result<Option<(Window, 
     Ok(Some((Window::new(x0, y0, x1 - x0, y1 - y0), [b.0, b.1, b.2, b.3])))
 }
 
+/// Whether pixels already share an affine grid, up to roundoff in its integer origin offset.
+fn pixel_aligned_translation(source: &[f64; 6], destination: &[f64; 6]) -> bool {
+    if [1, 2, 4, 5].iter().any(|&i| source[i] != destination[i]) {
+        return false;
+    }
+    let Some(inverse) = super::invert_gt(destination) else { return false };
+    let (x, y) = super::apply_gt(&inverse, source[0], source[3]);
+    x.is_finite() && y.is_finite() && (x - x.round()).abs() < 1e-7 && (y - y.round()).abs() < 1e-7
+}
+
 fn update_tiff<F: Read + Write + Seek>(
     file: &mut F,
     dst: &mut LazyRaster,
@@ -141,7 +160,6 @@ fn update_tiff<F: Read + Write + Seek>(
     o: &UpdateOptions,
 ) -> Result<Option<(Window, [f64; 4])>> {
     let tiff = gtiff_update::parse(file)?;
-    gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     let main = tiff
         .dirs
         .iter()
@@ -172,7 +190,16 @@ fn update_tiff<F: Read + Write + Seek>(
         dst_srs: (!crs.is_unknown()).then_some(crs),
         dst_transform: Some(wgt),
         size: Some((win.width, win.height)),
-        resampling: o.resampling,
+        // Averaging one exactly aligned source cell is a direct copy. Avoid allowing
+        // affine roundoff to introduce a neighboring source cell at a shared edge.
+        resampling: if o.resampling == Resampling::Average
+            && (src.crs().same_as(&dst.crs()) || src.crs().is_unknown() && dst.crs().is_unknown())
+            && pixel_aligned_translation(&src.geo_transform(), &dst.geo_transform())
+        {
+            Resampling::Nearest
+        } else {
+            o.resampling
+        },
         dst_nodata: Nodata::Values(vec![f64::NAN]),
         output_type: Some(DataType::F64),
         cutline: geometry,
@@ -206,6 +233,7 @@ fn update_tiff<F: Read + Write + Seek>(
     if !changed {
         return Ok(None);
     }
+    gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     let c = Computed { size: (w, dst.height()), rows, data, mask: None };
     let mut a = Appender::new(file, tiff.big)?;
     let mut dirs = tiff.dirs.clone();
@@ -228,4 +256,18 @@ pub fn parse_geometry(text: &str, crs: Option<crate::crs::SpatialRef>) -> Result
     // The given CRS, else the destination's (set when the update starts).
     c.srs = crs;
     Ok(c)
+}
+
+#[cfg(test)]
+mod update_boundary_tests {
+    use super::pixel_aligned_translation;
+
+    #[test]
+    fn only_integer_offsets_on_identical_pixel_grids_are_direct_copies() {
+        let destination = [0., 1., 0., 12., 0., -1.];
+        assert!(pixel_aligned_translation(&[4., 1., 0., 8., 0., -1.], &destination));
+        assert!(pixel_aligned_translation(&[4. + 1e-12, 1., 0., 8., 0., -1.], &destination));
+        assert!(!pixel_aligned_translation(&[4.25, 1., 0., 8., 0., -1.], &destination));
+        assert!(!pixel_aligned_translation(&[4., 2., 0., 8., 0., -2.], &destination));
+    }
 }

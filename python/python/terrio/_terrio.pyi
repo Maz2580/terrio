@@ -9,6 +9,13 @@ from numpy.typing import DTypeLike, NDArray
 
 # PyO3 sets `__all__` to the names added to the module, in registration order.
 __all__ = [
+    "create_raster",
+    "edit_raster",
+    "move_raster",
+    "add_overviews",
+    "delete_overviews",
+    "refresh_overviews",
+    "update_raster",
     "__version__",
     "Raster",
     "GeoTiffWriter",
@@ -1550,3 +1557,88 @@ def update_vector(
     key: list[str] | None = None,
     mode: str = "merge",
 ) -> VectorDataset: ...
+def create_raster(
+    dst: str | None = None,
+    *,
+    like: str | os.PathLike[str] | Raster | None = None,
+    size: tuple[int, int] | None = None,
+    band_count: int | None = None,
+    ot: str | None = None,
+    crs: str | None = None,
+    bbox: Sequence[float] | None = None,
+    nodata: float | None = None,
+    unset_nodata: bool = False,
+    burn: Sequence[float] | None = None,
+    metadata: Mapping[str, str] | None = None,
+    copy_metadata: bool = False,
+    copy_overviews: bool = False,
+    overwrite: bool = False,
+    format: str | None = None,
+    compress: str | None = None,
+    tile_size: int | None = None,
+    bigtiff: bool = False,
+) -> Raster: ...
+def add_overviews(
+    path: str,
+    levels: Sequence[int] | None = None,
+    *,
+    min_size: int = 256,
+    resampling: str = "nearest",
+    external: bool = False,
+    compression: str | None = None,
+    ignore_cog_layout_break: bool = False,
+) -> list[tuple[int, int]]: ...
+def delete_overviews(
+    path: str,
+    *,
+    external: bool = False,
+    ignore_cog_layout_break: bool = False,
+) -> None: ...
+def refresh_overviews(
+    path: str,
+    levels: Sequence[int] | None = None,
+    *,
+    resampling: str | None = None,
+    bbox: Sequence[Sequence[float]] | None = None,
+    like: Sequence[str] | None = None,
+    external: bool = False,
+    ignore_cog_layout_break: bool = False,
+) -> list[tuple[int, int]]: ...
+def update_raster(
+    src: str | os.PathLike[str] | Raster,
+    dst: str,
+    *,
+    resampling: str = "nearest",
+    geometry: str | None = None,
+    geometry_crs: str | None = None,
+    no_update_overviews: bool = False,
+    error_threshold: float | None = None,
+    ignore_cog_layout_break: bool = False,
+) -> tuple[int, int, int, int] | None: ...
+def edit_raster(
+    path: str,
+    *,
+    crs: str | None = None,
+    unset_crs: bool = False,
+    geotransform: Sequence[float] | None = None,
+    bbox: Sequence[float] | None = None,
+    gcps: Sequence[tuple[float, float, float, float, float]] | None = None,
+    nodata: float | None = None,
+    unset_nodata: bool = False,
+    metadata: Mapping[str, str] | None = None,
+    unset_metadata: Sequence[str] | None = None,
+    unset_all_metadata: bool = False,
+    stats: bool = False,
+    approx_stats: bool = False,
+    unset_stats: bool = False,
+    histogram: bool = False,
+    ignore_cog_layout_break: bool = False,
+) -> None: ...
+def move_raster(
+    path: str,
+    t_srs: str,
+    *,
+    s_srs: str | None = None,
+    error_threshold: float | None = None,
+    ignore_cog_layout_break: bool = False,
+) -> dict[str, Any]: ...

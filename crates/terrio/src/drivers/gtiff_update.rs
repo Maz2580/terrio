@@ -180,6 +180,7 @@ pub(crate) fn parse<R: Read + Seek>(r: &mut R) -> Result<Tiff> {
         }
         u32::from_le_bytes(head[4..8].try_into().unwrap()) as u64
     };
+    let mut metadata_budget = 64u64 << 20;
     let (count_len, entry_len, inline) = if big { (8usize, 20usize, 8usize) } else { (2, 12, 4) };
     let mut seen = std::collections::HashSet::new();
     let mut dirs = Vec::new();
@@ -192,6 +193,9 @@ pub(crate) fn parse<R: Read + Seek>(r: &mut R) -> Result<Tiff> {
         let count = if big { u64::from_le_bytes(c) } else { u16::from_le_bytes([c[0], c[1]]) as u64 };
         let table_len =
             count.checked_mul(entry_len as u64).filter(|n| *n <= len).ok_or_else(|| Error::InvalidData("TIFF: too many tags".into()))?;
+        metadata_budget = metadata_budget
+            .checked_sub(table_len + inline as u64)
+            .ok_or_else(|| Error::InvalidData("TIFF update metadata exceeds 64 MiB".into()))?;
         let mut table = vec![0u8; table_len as usize + inline];
         read_at(r, next + count_len as u64, &mut table, len)?;
         let mut entries = Vec::with_capacity(count as usize);
@@ -209,6 +213,8 @@ pub(crate) fn parse<R: Read + Seek>(r: &mut R) -> Result<Tiff> {
             };
             let bytes_len =
                 n.checked_mul(size).filter(|b| *b <= len).ok_or_else(|| Error::InvalidData(format!("TIFF: tag {tag} is too large")))?;
+            metadata_budget =
+                metadata_budget.checked_sub(bytes_len).ok_or_else(|| Error::InvalidData("TIFF update metadata exceeds 64 MiB".into()))?;
             let bytes = if bytes_len as usize <= inline {
                 field[..bytes_len as usize].to_vec()
             } else {
@@ -242,12 +248,12 @@ pub(crate) struct Appender<'a, F: Write + Seek> {
 impl<'a, F: Write + Seek> Appender<'a, F> {
     /// Appends to `file`, a TIFF (or BigTIFF) whose header is written.
     pub(crate) fn new(file: &'a mut F, big: bool) -> Result<Self> {
-        let pos = file.seek(SeekFrom::End(0))?;
-        let mut a = Self { file, big, pos };
+        let mut pos = file.seek(SeekFrom::End(0))?;
         if pos % 2 == 1 {
-            a.write(&[0])?;
+            file.write_all(&[0])?;
+            pos += 1;
         }
-        Ok(a)
+        Ok(Self { file, big, pos })
     }
 
     /// Whether the file is a BigTIFF.
@@ -418,7 +424,7 @@ pub(crate) fn intact_cog_layout<R: Read + Seek>(r: &mut R, big: bool) -> Result<
     if r.read_exact(&mut body).is_err() {
         return Ok(None);
     }
-    let text = String::from_utf8_lossy(&body);
+    let Ok(text) = std::str::from_utf8(&body) else { return Ok(None) };
     let key = "KNOWN_INCOMPATIBLE_EDITION=NO";
     match (text.contains("LAYOUT=IFDS_BEFORE_DATA"), text.find(key)) {
         (true, Some(i)) if body.get(i + key.len()..).is_some_and(|tail| tail.starts_with(b"\n ")) => {
@@ -568,7 +574,10 @@ mod tests {
     #[test]
     fn rewritten_chains_read_back_identically() {
         for big in [false, true] {
-            let bytes = sample(big);
+            let mut bytes = sample(big);
+            if bytes.len().is_multiple_of(2) {
+                bytes.push(0);
+            }
             let tiff = parse(&mut std::io::Cursor::new(&bytes)).unwrap();
             assert_eq!(tiff.big, big);
             let mut out = std::io::Cursor::new(bytes.clone());
@@ -576,6 +585,12 @@ mod tests {
             dir.set(Entry::new(305, &Value::Ascii("terrio".into()), big));
             Appender::new(&mut out, big).unwrap().finish(&[dir.clone()]).unwrap();
             let out = out.into_inner();
+            let first = if big {
+                u64::from_le_bytes(out[8..16].try_into().unwrap())
+            } else {
+                u32::from_le_bytes(out[4..8].try_into().unwrap()) as u64
+            };
+            assert_eq!(first % 2, 0);
             let again = parse(&mut std::io::Cursor::new(&out)).unwrap();
             assert_eq!(again.dirs, vec![dir]);
             let a = crate::LazyRaster::from_tiff_bytes(bytes).unwrap().unwrap().read().unwrap();

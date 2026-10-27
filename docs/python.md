@@ -455,3 +455,23 @@ uploaded = terrio.open_vrt(xml, {"dem.tif": image_bytes})
 source windows remain lazy. `open_raster(path, lazy=True)` also opens VRT files
 lazily. The [serialized VRT support](cli.md#serialized-virtual-rasters) lists the
 supported transformers, built-in functions, kernels and masks.
+
+### Raster management
+
+`create_raster(dst=None, *, like=None, size=None, band_count=None, ot=None,
+crs=None, bbox=None, nodata=None, burn=None, metadata=None, ...)` creates an
+in-memory raster or a file. File creation accepts writer options, overwrite,
+copy_metadata and copy_overviews. `edit_raster(path, ...)` changes CRS, transform,
+GCPs, nodata, metadata, statistics and histograms in place. `move_raster(path,
+t_srs, s_srs=None, error_threshold=None, ...)` reports georeferencing changes,
+and applies them only when the affine error is below the supplied threshold.
+Both operations preserve pixel values.
+
+`add_overviews`, `delete_overviews` and `refresh_overviews` manage internal or
+external GeoTIFF levels. `update_raster(src, dst, ...)` warps valid source pixels
+into an existing file and returns its changed window, or None for no overlap.
+Their keyword options follow the CLI, including compression, partial refresh,
+clipping geometry and overview updates. Local writable little-endian GeoTIFFs
+are required for in-place changes; external overview updates can fail after the
+base update commits. Use `create-raster`, `edit-raster` and `update-raster` when
+calling the corresponding CLI commands.

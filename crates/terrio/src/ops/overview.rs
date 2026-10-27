@@ -210,22 +210,49 @@ pub fn add_overviews(path: &str, options: &OverviewOptions) -> Result<Vec<(usize
     let method = overview_method(options.resampling)?;
     let factors = factors(&src, &options.levels, options.min_size)?;
     if options.external {
-        let ovr = ovr_path(&file);
+        let ovr = ovr_path(std::path::Path::new(path));
         let main = parse_file(&file)?;
         if main.dirs.iter().any(Directory::is_overview) {
             return Err(Error::InvalidArgument(format!("'{path}' has internal overviews: external ones cannot be added (as in GDAL)")));
         }
-        let mut sizes: Vec<(usize, usize)> = factors.iter().map(|f| (src.width().div_ceil(*f), src.height().div_ceil(*f))).collect();
-        if ovr.is_file() {
-            let existing = parse_file(&ovr)?;
-            sizes.extend(existing.dirs.iter().filter(|d| d.is_overview()).map(Directory::size));
+        let sizes: Vec<(usize, usize)> = factors.iter().map(|f| (src.width().div_ceil(*f), src.height().div_ceil(*f))).collect();
+        let existing = if ovr.is_file() { Some(parse_file(&ovr)?) } else { None };
+        if sizes.is_empty() {
+            return Ok(existing.map_or_else(Vec::new, |t| t.dirs.iter().filter(|d| !d.is_mask()).map(Directory::size).collect()));
         }
         let compression = options.compression.as_deref().unwrap_or("NONE");
         let main_dir = &main.dirs[images(&main).main.unwrap_or(0)];
-        let levels = build_new_levels(&mut src, main_dir, &sizes, method, compression)?;
+        let levels = build_new_levels(
+            &mut src,
+            main_dir,
+            &sizes,
+            method,
+            compression,
+            options.compression.is_some(),
+            existing.as_ref().map(|t| t.dirs.as_slice()),
+        )?;
         drop(src);
-        gtiff_update::replace_file(&ovr, |f| write_ovr(f, levels, main_dir))?;
-        return Ok(sorted_sizes(sizes));
+        let mut all_sizes = sizes;
+        if let Some(existing) = existing {
+            all_sizes.extend(existing.dirs.iter().filter(|d| d.is_overview() && !d.is_mask()).map(Directory::size));
+            gtiff_update::update_file(&ovr, |f| {
+                let mut a = Appender::new(f, existing.big)?;
+                let mut dirs = existing.dirs;
+                for img in levels {
+                    let mut dir = a.image(img)?;
+                    shared_tags(main_dir, &mut dir);
+                    match dirs.iter().position(|old| !old.is_mask() && old.size() == dir.size()) {
+                        Some(i) => dirs[i] = dir,
+                        None => dirs.push(dir),
+                    }
+                }
+                dirs.sort_by_key(|d| std::cmp::Reverse(d.size()));
+                a.finish(&dirs)
+            })?;
+        } else {
+            gtiff_update::replace_file(&ovr, |f| write_ovr(f, levels, main_dir))?;
+        }
+        return Ok(sorted_sizes(all_sizes));
     }
     let compression = options.compression.clone();
     let cog = options.ignore_cog_layout_break;
@@ -257,8 +284,12 @@ pub fn add_overviews_to_bytes(tiff: &[u8], options: &OverviewOptions) -> Result<
 pub fn delete_overviews(path: &str, options: &DeleteOptions) -> Result<()> {
     let file = gtiff_update::writable_local_file(path)?;
     if options.external {
-        let ovr = ovr_path(&file);
+        let ovr = ovr_path(std::path::Path::new(path));
         if ovr.is_file() {
+            let tiff = parse_file(&ovr)?;
+            if tiff.dirs.is_empty() || !tiff.dirs.iter().all(|d| d.is_overview() || d.is_mask()) {
+                return Err(Error::InvalidArgument(format!("refusing to remove '{}': not an overview sidecar", ovr.display())));
+            }
             std::fs::remove_file(&ovr)?;
         }
         return Ok(());
@@ -282,7 +313,7 @@ pub fn delete_overviews_from_bytes(tiff: &[u8], options: &DeleteOptions) -> Resu
 pub fn refresh_overviews(path: &str, options: &RefreshOptions) -> Result<Vec<(usize, usize)>> {
     let file = gtiff_update::writable_local_file(path)?;
     let mut src = open_source(path)?;
-    let target = if options.external { ovr_path(&file) } else { file };
+    let target = if options.external { ovr_path(std::path::Path::new(path)) } else { file };
     if options.external && !target.is_file() {
         return Err(Error::InvalidArgument(format!("'{}' has no external overviews ({} is missing)", path, target.display())));
     }
@@ -861,11 +892,19 @@ fn build_new_levels(
     sizes: &[(usize, usize)],
     method: OverviewResampling,
     compression: &str,
+    override_compression: bool,
+    existing: Option<&[Directory]>,
 ) -> Result<Vec<gw::Image>> {
     warn_integer_precision(src.data_type());
     let sizes = sorted_sizes(sizes.to_vec());
     let (layout, new_compression, ..) = layout_like(like, Some(compression), true, src.data_type())?;
-    let blocks: Vec<(usize, usize)> = sizes.iter().map(|s| chunk_size(&layout, s.0)).collect();
+    let blocks: Vec<(usize, usize)> = sizes
+        .iter()
+        .map(|size| match existing.and_then(|dirs| dirs.iter().find(|d| !d.is_mask() && d.size() == *size)) {
+            Some(dir) => layout_like(dir, None, false, src.data_type()).map(|(l, ..)| chunk_size(&l, size.0)),
+            None => Ok(chunk_size(&layout, size.0)),
+        })
+        .collect::<Result<_>>()?;
     let alpha = alpha_band(src);
     let multiband = gdal_multiband(like, true, new_compression != Compression::None, src.band_count(), alpha.is_some());
     let base_block = base_block(src);
@@ -875,7 +914,18 @@ fn build_new_levels(
     let mut out = Vec::new();
     for (i, &size) in sizes.iter().enumerate() {
         let c = compute(&mut srcs, size, 0..size.1, prev.as_ref(), method, data[i], None, 0)?;
-        out.push(new_level_image(&c, like, Some(compression), method, srcs.src.data_type(), srcs.src.band_count())?.0);
+        let old = existing.and_then(|dirs| dirs.iter().find(|d| !d.is_mask() && d.size() == size));
+        out.push(
+            new_level_image(
+                &c,
+                old.unwrap_or(like),
+                if old.is_some() && !override_compression { None } else { Some(compression) },
+                method,
+                srcs.src.data_type(),
+                srcs.src.band_count(),
+            )?
+            .0,
+        );
         prev = Some(c);
     }
     Ok(out)
@@ -961,6 +1011,13 @@ fn add_internal<F: Read + Write + Seek>(
         let c = compute(&mut srcs, size, 0..size.1, prev.as_ref(), method, data[k], masks[k], 0)?;
         let src = &mut *srcs.src;
         let (dir, mask) = match existing {
+            Some(&(_, i, old_mask)) if compression.is_some() => {
+                let (image, mask) = new_level_image(&c, &tiff.dirs[i], compression, method, src.data_type(), src.band_count())?;
+                let mut dir = a.image(image)?;
+                shared_tags(main_dir, &mut dir);
+                let mask = if im.main_mask || old_mask.is_some() { mask.map(|m| a.image(m)).transpose()? } else { None };
+                (dir, mask)
+            }
             // An existing level is recomputed in its own layout.
             Some(&(_, i, mask)) => {
                 let mut dir = replace_chunks(&mut a, &tiff.dirs[i], &c, 0..c.size.0, src.data_type(), src.band_count(), None)?;
@@ -1102,6 +1159,9 @@ pub(crate) fn refresh<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster
     gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     let im = images(&tiff);
     let (w, h) = (src.width(), src.height());
+    if let Some(f) = o.levels.iter().find(|f| **f < 2) {
+        return Err(Error::InvalidArgument(format!("an overview level is a decimation factor of 2 or more, not {f}")));
+    }
     let mut targets: Vec<((usize, usize), usize, Option<usize>)> = im
         .overviews
         .iter()

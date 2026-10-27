@@ -474,6 +474,30 @@ def suite_shapefile_archives(ctx):
     return suite
 
 
+def suite_raster_manage(ctx):
+    """Real DEM raster management, cross-read and compared by GDAL."""
+    suite = Suite("raster-manage", "Raster management", "GDAL 3.13.3",
+                  "Creation types/bands, metadata escaping, nodata, internal/external overview add/delete "
+                  "and real DEM subset updates: masks, type, nodata, CRS and geotransform exact; "
+                  "pixel values exact or within 2e-7 relative and 1e-6 absolute tolerance.")
+    missing = missing_modules("osgeo", "numpy")
+    if missing:
+        suite.skipped = "needs the Python modules " + ", ".join(missing)
+        return suite
+    code, out, err = run([sys.executable, str(SCRIPTS / "compare_raster_manage_with_gdal.py"), ctx.data,
+                          "--terrio", ctx.terrio, "--json"])
+    try:
+        results = json.loads(out)
+    except json.JSONDecodeError:
+        suite.error = tail(err or out) or f"comparison exited {code} without valid JSON"
+        return suite
+    for result in results:
+        suite.cases.append(Case("raster management", result["name"], result["status"], result["detail"]))
+    if not results or code and not any(case.status == DIFFERS for case in suite.cases):
+        suite.error = tail(err or out) or f"comparison exited {code} without complete results"
+    return suite
+
+
 def suite_cad(ctx):
     """CAD geometry interchange against public GDAL drawings and real OSM roads."""
     suite = Suite(
@@ -1615,6 +1639,7 @@ SUITES = OrderedDict(
         ("catalogs", suite_catalogs),
         ("vrt", suite_vrt),
         ("overviews", suite_overviews),
+        ("raster-manage", suite_raster_manage),
         ("geolocation", suite_geolocation),
         ("dem-calc", suite_dem_calc),
         ("pansharpen", suite_pansharpen),

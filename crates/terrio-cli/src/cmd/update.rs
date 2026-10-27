@@ -1,4 +1,4 @@
-//! `terrio update`: write a raster into an existing GeoTIFF, reprojected to its grid (GDAL's
+//! `terrio update-raster`: write a raster into an existing GeoTIFF, reprojected to its grid (GDAL's
 //! `gdal raster update`).
 
 use terrio::ops::Resampling;

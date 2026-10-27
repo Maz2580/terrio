@@ -529,3 +529,23 @@ Additional GDAL 3.13 raster-query source copyrights:
   Copyright (c) 2002, Frank Warmerdam <warmerdam@pobox.com>;
   Copyright (c) 2020-2021, Idan Miara <idan@miara.com>
 Licensed under the MIT permission and warranty terms reproduced above for GDAL.
+
+GDAL raster management and overview algorithms
+--------------------------------------------
+The overview arithmetic and regeneration scheduling in ops/overview_kernel.rs and
+ops/overview.rs are adapted from GDAL 3.12 gcore/overview.cpp (including
+GDALRegenerateOverviewsEx/MultiBand, GDALComputeOvFactor and GDALOvLevelAdjust2).
+The TIFF update/edit implementation follows the GDAL GTiff driver behavior.
+Source: https://github.com/OSGeo/gdal/tree/v3.12.0
+Licensed under the MIT permission and warranty terms reproduced above for GDAL.
+
+GDAL raster-management source copyrights (MIT):
+- gcore/overview.cpp: Copyright (c) 2000, Frank Warmerdam;
+  Copyright (c) 2007-2010, Even Rouault <even dot rouault at spatialys.com>
+- frmts/gtiff/gtiffdataset_write.cpp: Copyright (c) 1998, 2002, Frank Warmerdam;
+  Copyright (c) 2007-2015, Even Rouault
+- swig/python/gdal-utils/osgeo_utils/gdal_edit.py:
+  Copyright (c) 2011-2013, Even Rouault
+- swig/python/gdal-utils/osgeo_utils/gdalmove.py:
+  Copyright (c) 2012, Frank Warmerdam; Copyright (c) 2021, Idan Miara
+Licensed under the MIT permission and warranty terms reproduced above for GDAL.

@@ -235,7 +235,6 @@ const CRS_TAGS: [u16; 3] = [34735, 34736, 34737];
 
 fn edit_tiff<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &EditOptions) -> Result<()> {
     let tiff = gtiff_update::parse(file)?;
-    gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     let main = tiff
         .dirs
         .iter()
@@ -344,6 +343,7 @@ fn edit_tiff<F: Read + Write + Seek>(file: &mut F, src: &mut LazyRaster, o: &Edi
     if dirs == tiff.dirs {
         return Ok(());
     }
+    gtiff_update::break_cog_layout(file, tiff.big, o.ignore_cog_layout_break)?;
     Appender::new(file, big)?.finish(&dirs)
 }
 
@@ -609,6 +609,15 @@ fn move_report(src: &LazyRaster, o: &MoveOptions) -> Result<MoveReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_metadata_values_use_gdal_cpl_and_xml_escaping() {
+        let value = "A & <B>";
+        let xml = items_xml(&[Item::dataset("SOURCE", value)]);
+        // GDAL stores a CPL-escaped value inside XML-escaped text.
+        assert_eq!(gw::parse_gdal_metadata(&xml)[0].1, value);
+        assert!(xml.contains("&amp;amp;"));
+    }
 
     #[test]
     fn histograms_join_existing_sidecars() {

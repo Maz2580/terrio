@@ -427,8 +427,8 @@ fn mode(
         DataType::U64 | DataType::I64 => (0.0..18446744073709551615.0).contains(&nd),
     };
     let empty = t.nodata.filter(|nd| in_range(*nd)).unwrap_or(0.0);
-    let same = |a: f64, b: f64| a == b || (a.is_nan() && b.is_nan());
-    let mut seen: Vec<(f64, u32)> = Vec::new();
+    let mut seen: Vec<(f64, u64)> = Vec::new();
+    let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     let mut best = 0;
     for y in y0..y1 {
         for x in w.x0..w.x1 {
@@ -437,14 +437,24 @@ fn mode(
             if !valid {
                 continue;
             }
-            match seen.iter().position(|(s, _)| same(*s, v)) {
+            let key = if v == 0.0 {
+                0
+            } else if v.is_nan() {
+                f64::NAN.to_bits()
+            } else {
+                v.to_bits()
+            };
+            match counts.get(&key).copied() {
                 Some(i) => {
                     seen[i].1 += 1;
                     if seen[i].1 > seen[best].1 {
                         best = i;
                     }
                 }
-                None => seen.push((v, 1)),
+                None => {
+                    counts.insert(key, seen.len());
+                    seen.push((v, 1));
+                }
             }
         }
     }

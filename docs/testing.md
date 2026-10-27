@@ -748,3 +748,25 @@ multiband fixture, build profile and thread count. Compare every output pixel, t
 value and georeferencing value as well as memory use. Record fixture details and observations
 in the PR validation notes; they are not runtime or general memory guarantees. These operations
 still materialize input and output, so eliminating intermediates does not make them streaming.
+
+## Raster management (#289)
+
+`scripts/compare_raster_manage_with_gdal.py` is registered as `raster-manage`.
+With GDAL 3.13.3 it checks 21 cases: six creation types with two bands; nearest,
+average and mode internal/external overview add/delete; metadata XML escaping;
+nearest/bilinear/average updates of real DEM subsets; internal/external destination
+masks; genuine fractional-cell average overlaps; and integer bounds/nodata
+collisions. Values, masks, types, nodata, CRS, transforms and overview levels match
+exactly in the final run. The script retains explicit numeric tolerances for future
+non-exact fixtures and reports failures as differences.
+
+A tiled 65,536 by 64 Float32 destination updated from a 128 by 16 source reports
+78,608 KiB peak child RSS on this machine. The changed block window is 512 by 48;
+its destination-row buffers still span the full width. This fixture is a measured
+example, not a general memory bound. In-place edits require a whole-file copy.
+
+```sh
+python scripts/conformance.py ../terrio-data --only raster-manage --strict
+pytest python/tests/test_raster_manage.py
+cargo test -p terrio-cli --test raster_manage
+```

@@ -5,6 +5,8 @@ mod arrow;
 #[cfg(not(target_os = "emscripten"))]
 mod cli;
 mod focal;
+
+mod manage;
 mod multidim;
 mod ops;
 mod pixel;
@@ -87,6 +89,7 @@ fn _terrio(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<arrow::PyArrowTable>()?;
     m.add_function(wrap_pyfunction!(arrow::from_arrow, m)?)?;
     ops::register(m)?;
+    manage::register(m)?;
     multidim::register(m)?;
     terrain::register(m)?;
     query::register(m)?;

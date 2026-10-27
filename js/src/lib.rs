@@ -12,6 +12,7 @@
 //! const points = readPoints(lazBytes, "lidar.laz", { classes: [2] }); // LAS, LAZ, COPC
 //! ```
 
+mod manage;
 mod multidim;
 mod ops;
 mod pixel;
@@ -452,8 +453,8 @@ impl Dataset {
     }
 
     /// The summary `terrio info --json` prints, as an object.
-    pub fn info(&self, stats: Option<bool>) -> Result<JsValue, JsError> {
-        let options = terrio::info::InfoOptions { statistics: stats.unwrap_or(false), histogram: false };
+    pub fn info(&self, stats: Option<bool>, hist: Option<bool>) -> Result<JsValue, JsError> {
+        let options = terrio::info::InfoOptions { statistics: stats.unwrap_or(false), histogram: hist.unwrap_or(false) };
         match &mut *self.inner.borrow_mut() {
             Inner::Raster(r) => {
                 let info = terrio::info::lazy_raster_info(r, &options).map_err(js_err)?;
