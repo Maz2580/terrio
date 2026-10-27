@@ -283,6 +283,7 @@ mod tests {
         // Read whole by window, as read eagerly.
         let all = lazy.read().unwrap();
         assert_eq!(all.raster.data.to_f64_vec(), whole.raster.data.to_f64_vec());
+        assert_eq!(all.raster.metadata, whole.raster.metadata);
         assert_eq!(
             (all.raster.data_type, all.nodata(), all.geo_transform()),
             (whole.raster.data_type, whole.nodata(), whole.geo_transform())

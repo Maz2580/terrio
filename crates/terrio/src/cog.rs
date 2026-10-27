@@ -765,7 +765,13 @@ impl LazyRaster {
     /// Reads the whole full-resolution image.
     pub fn read(&mut self) -> Result<RasterDataset> {
         let window = Window::full(self.width(), self.height());
-        self.read_window(window, &WindowOptions::default())
+        let mut ds = self.read_window(window, &WindowOptions::default())?;
+        // The whole image of another driver's source, as that driver reads it whole: with the
+        // dataset's metadata items, which a window leaves out.
+        if let Inner::Source(header, _) = &self.inner {
+            ds.raster.metadata = header.raster.metadata.clone();
+        }
+        Ok(ds)
     }
 
     /// Writes the full-resolution image to `path`, as [`crate::write_raster_dataset`] writes the
